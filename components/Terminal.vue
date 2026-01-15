@@ -22,8 +22,29 @@ onMounted(async () => {
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     fontSize: 14,
     theme: {
-      background: '#1e1e20', // Zinc-900 like
-      foreground: '#ffffff',
+      background: '#282a36',
+      foreground: '#f8f8f2',
+      cursor: '#f8f8f2',
+      cursorAccent: '#282a36',
+      selectionBackground: '#44475a',
+      
+      black: '#21222c',
+      red: '#ff5555',
+      green: '#50fa7b',
+      yellow: '#f1fa8c',
+      blue: '#bd93f9',
+      magenta: '#ff79c6',
+      cyan: '#8be9fd',
+      white: '#f8f8f2',
+      
+      brightBlack: '#6272a4',
+      brightRed: '#ff6e6e',
+      brightGreen: '#69ff94',
+      brightYellow: '#ffffa5',
+      brightBlue: '#d6acff',
+      brightMagenta: '#ff92df',
+      brightCyan: '#a4ffff',
+      brightWhite: '#ffffff',
     }
   })
   
@@ -75,5 +96,5 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="terminalContainer" class="h-full w-full bg-zinc-900 overflow-hidden" />
+  <div ref="terminalContainer" class="h-full w-full bg-[#282a36] overflow-hidden" />
 </template>
