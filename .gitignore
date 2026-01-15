@@ -1,0 +1,33 @@
+# Nuxt Dev
+.nuxt
+.output
+.data
+.env
+dist
+
+# Node
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+src-tauri/capabilities/mobile
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE Config
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea
+*.suo
+*.ntvs
+*.njsproj
+*.sln
+*.sw?
