@@ -41,6 +41,19 @@ async fn send_ssh_input(
 }
 
 #[tauri::command]
+async fn disconnect_ssh(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut connections = state.connections.lock().await;
+    if connections.remove(&id).is_some() {
+        Ok(())
+    } else {
+        Err("Session not found".into())
+    }
+}
+
+#[tauri::command]
 #[allow(dead_code)]
 async fn resize_pty(
     // Implement resize later
@@ -51,7 +64,7 @@ fn main() {
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_log::Builder::default().build())
         .manage(AppState::new())
-        .invoke_handler(tauri::generate_handler![connect_ssh, send_ssh_input])
+        .invoke_handler(tauri::generate_handler![connect_ssh, send_ssh_input, disconnect_ssh, resize_pty])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

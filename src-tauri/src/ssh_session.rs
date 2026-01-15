@@ -105,8 +105,16 @@ pub async fn connect_and_stream(
                     }
                 }
                 // Read from Frontend (via mpsc) -> Write to SSH Channel
-                Some(data) = rx.recv() => {
-                    let _ = channel.data(&data[..]).await;
+                msg = rx.recv() => {
+                    match msg {
+                        Some(data) => {
+                             let _ = channel.data(&data[..]).await;
+                        }
+                        None => {
+                            // Sender dropped (disconnect called), break loop
+                            break;
+                        }
+                    }
                 }
             }
         }
