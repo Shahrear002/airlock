@@ -26,12 +26,30 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Shahrear002",
+    "copyright": "Copyright © 2026 Shahrear002",
+    "category": "DeveloperTool",
+    "shortDescription": "A secure SSH client with modern UI",
+    "longDescription": "Airlock is a modern, secure SSH client built with Tauri and Vue.js, providing an intuitive interface for managing SSH connections.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.13"
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
   }
 }
