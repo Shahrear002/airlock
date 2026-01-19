@@ -35,7 +35,8 @@ const handleExport = async () => {
     isExporting.value = true
     
     try {
-        const encryptedData = await exportData(hostsStore.hosts, exportPassword.value)
+        const dataToExport = await hostsStore.exportState()
+        const encryptedData = await exportData(dataToExport, exportPassword.value)
         
         // Use Tauri Save Dialog to let user pick location
         const filePath = await save({
@@ -105,7 +106,7 @@ const handleImport = async () => {
     
     try {
         const data = await importData(selectedFileContent.value, importPassword.value)
-        hostsStore.replaceState(data)
+        await hostsStore.importState(data)
         importSuccess.value = "Backup restored successfully!"
         selectedFileContent.value = null
         importPassword.value = ''
