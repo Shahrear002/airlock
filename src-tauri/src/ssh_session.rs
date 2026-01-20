@@ -1,14 +1,21 @@
 use russh::*;
-use russh_keys::*;
+use russh_keys::key;
+
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tauri::{Emitter, Manager}; // Added Manager, Removed Listener
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
+// Input types for the SSH loop
+pub enum SshInput {
+    Data(Vec<u8>),
+    Resize(u32, u32), // cols, rows
+}
+
 // Structure to hold the SSH session sender for writing data
 pub struct SshConnection {
-    pub tx: mpsc::UnboundedSender<Vec<u8>>,
+    pub tx: mpsc::UnboundedSender<SshInput>,
 }
 
 // Global state to manage active connections
@@ -69,10 +76,11 @@ pub async fn connect_and_stream(
     let mut channel = session.channel_open_session().await?;
     // request_pty takes (want_reply, term, col_width, row_height, pix_width, pix_height, modes)
     channel.request_pty(false, "xterm", 80, 24, 0, 0, &[]).await?;
-    channel.request_shell(false).await?; // Changed exec_shell to request_shell
+    channel.request_shell(false).await?; 
 
     // Create channel for input from Frontend -> SSH
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // CHANGED: Use SshInput enum
+    let (tx, mut rx) = mpsc::unbounded_channel::<SshInput>();
 
     // Store the sender in AppState
     {
@@ -91,14 +99,14 @@ pub async fn connect_and_stream(
                 // Read from SSH Channel -> Send to Frontend
                 msg = channel.wait() => {
                     match msg {
-                        Some(ChannelMsg::Data { ref data }) => { // Removed Ok() wrapper
+                        Some(ChannelMsg::Data { ref data }) => { 
                             let _ = app_handle_clone.emit(&format!("ssh-output-{}", id_clone), data.to_vec());
                         }
-                        Some(ChannelMsg::ExitStatus { exit_status }) => { // Removed Ok() wrapper
+                        Some(ChannelMsg::ExitStatus { exit_status }) => { 
                              let _ = app_handle_clone.emit(&format!("ssh-exit-{}", id_clone), exit_status);
                              break;
                         }
-                        Some(ChannelMsg::Close) | None => { // Handle Close explicitly
+                        Some(ChannelMsg::Close) | None => { 
                             break;
                         }
                          _ => {}
@@ -107,8 +115,12 @@ pub async fn connect_and_stream(
                 // Read from Frontend (via mpsc) -> Write to SSH Channel
                 msg = rx.recv() => {
                     match msg {
-                        Some(data) => {
+                        Some(SshInput::Data(data)) => {
                              let _ = channel.data(&data[..]).await;
+                        }
+                        Some(SshInput::Resize(cols, rows)) => {
+                            // window_change(col_width, row_height, pix_width, pix_height)
+                            let _ = channel.window_change(cols, rows, 0, 0).await;
                         }
                         None => {
                             // Sender dropped (disconnect called), break loop

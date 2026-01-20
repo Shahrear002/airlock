@@ -92,15 +92,49 @@ onMounted(async () => {
       }, 500)
   })
   
-  window.addEventListener('resize', onResize)
+  // Use ResizeObserver to handle container resize (window resize or layout changes)
+  const fitAndResize = async () => {
+    if (!fitAddon || !term) return
+    fitAddon.fit()
+    const { rows, cols } = term
+    try {
+        await invoke('resize_pty', { id: props.sessionId, rows, cols })
+    } catch (err) {
+        console.warn('Failed to resize PTY, session might not be ready yet:', err)
+        throw err
+    }
+  }
+
+  const performInitialResize = async (retries = 10, delay = 500) => {
+      for (let i = 0; i < retries; i++) {
+          try {
+              await fitAndResize()
+              console.log('Initial PTY resize successful')
+              return
+          } catch (e) {
+              if (i < retries - 1) {
+                  await new Promise(resolve => setTimeout(resolve, delay))
+              }
+          }
+      }
+      console.error('Failed to perform initial PTY resize after multiple attempts')
+  }
+
+  const resizeObserver = new ResizeObserver(() => {
+    fitAndResize().catch(e => console.error("Resize failed", e))
+  })
+
+  if (terminalContainer.value) {
+    resizeObserver.observe(terminalContainer.value)
+  }
+
+  // Also fit immediately (though observer will likely fire initially), with retry
+  setTimeout(() => {
+      performInitialResize()
+  }, 100)
 })
 
-const onResize = () => {
-  fitAddon?.fit()
-}
-
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', onResize)
   unlistenOutput?.()
   unlistenError?.()
   unlistenExit?.()

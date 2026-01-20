@@ -4,7 +4,7 @@
 mod ssh_session;
 
 use tauri::Emitter;
-use ssh_session::{AppState, connect_and_stream};
+use ssh_session::{AppState, connect_and_stream, SshInput};
 
 #[tauri::command]
 async fn connect_ssh(
@@ -35,7 +35,7 @@ async fn send_ssh_input(
     if let Some(conn) = connections.get(&id) {
          // data should be bytes (or base64? xterm usually sends strings, but raw bytes might be needed for special chars)
          // treating as bytes from string for now
-         let _ = conn.tx.send(data.into_bytes());
+         let _ = conn.tx.send(SshInput::Data(data.into_bytes()));
     }
     Ok(())
 }
@@ -54,10 +54,20 @@ async fn disconnect_ssh(
 }
 
 #[tauri::command]
-#[allow(dead_code)]
 async fn resize_pty(
-    // Implement resize later
-) {}
+    state: tauri::State<'_, AppState>,
+    id: String,
+    rows: u32,
+    cols: u32,
+) -> Result<(), String> {
+    let connections = state.connections.lock().await;
+    if let Some(conn) = connections.get(&id) {
+        let _ = conn.tx.send(SshInput::Resize(cols, rows));
+        Ok(())
+    } else {
+        Err("Session not found".into())
+    }
+}
 
 fn main() {
     tauri::Builder::default()
