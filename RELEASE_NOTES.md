@@ -1,3 +1,15 @@
+# Airlock v1.0.1 Release Notes
+
+This release addresses critical issues with terminal resizing and improves stability.
+
+## 🛠 Fixes & Improvements
+
+### Terminal
+- **Fixed Terminal Resize Synchronization**: Resolved an issue where opening text editors like `vim` or `nano` would result in a partial screen render (80x24 characters) instead of using the full available terminal space.
+- **Improved Connection Stability**: Implemented a retry mechanism for PTY resizing to ensure the correct terminal dimensions are applied even if the SSH session takes a moment to initialize.
+
+---
+
 # Airlock v1.0.0 Release Notes
 
 We are thrilled to announce the first public release of **Airlock**, a modern, local-first SSH client! 🎉
