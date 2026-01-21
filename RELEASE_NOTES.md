@@ -1,3 +1,18 @@
+# Airlock v1.0.3 Release Notes
+
+This release focuses on data security, storage reliability, and application stability.
+
+## 🔒 Security & Storage
+- **Secure File Storage**: Migrated from browser `localStorage` to a dedicated, encrypted-at-rest file storage (`store.bin`) in the AppData directory. This enhances security by moving sensitive data out of the browser sandbox.
+- **Data Safety**: Implemented robust overwrite protection to prevent data loss during startup race conditions.
+- **Self-Healing Hydration**: Added a failsafe mechanism to ensure your saved hosts always load, even if the primary storage plugin experiences delays.
+
+## 🛠 Fixes & Improvements
+- **Terminal Stability**: Fixed a race condition that caused "Session not found" errors when resizing the terminal immediately after connection.
+- **Performance**: Optimized storage adapter with lazy loading for faster application startup.
+
+---
+
 # Airlock v1.0.2 Release Notes
 
 This release introduces advanced customization options, layout improvements, and better terminal color support.

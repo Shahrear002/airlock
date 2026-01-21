@@ -42,7 +42,27 @@ const renameData = ref({
     name: ''
 })
 
+import { TauriStoreAdapter } from '~/utils/store-adapter'
+
 const emit = defineEmits(['connect'])
+
+onMounted(async () => {
+    // Manual Hydration Fallback
+    // If Pinia fails to rehydrate from Tauri store automatically (race condition), do it manually.
+    if (hostsStore.hosts.length === 0) {
+        const raw = await TauriStoreAdapter.getItem('hosts')
+        if (raw) {
+            try {
+                const parsed = JSON.parse(raw)
+                if (parsed.hosts) {
+                    hostsStore.$patch({ hosts: parsed.hosts })
+                }
+            } catch (e) {
+                console.error('HostSidebar: Manual patch failed:', e)
+            }
+        }
+    }
+})
 
 const rootItems = computed(() => hostsStore.getChildren(null))
 const allFolders = computed(() => hostsStore.hosts.filter(h => h.type === 'folder'))

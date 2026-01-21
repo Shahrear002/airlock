@@ -2,10 +2,31 @@
 // Utility for client-side encryption using Web Crypto API
 // Uses AES-GCM with a locally generated key stored in localStorage.
 
+import { TauriStoreAdapter } from '~/utils/store-adapter';
+
 const KEY_STORAGE_NAME = 'airlock_master_key';
 
 async function getOrGenerateKey(): Promise<CryptoKey> {
-    const storedKey = localStorage.getItem(KEY_STORAGE_NAME);
+    // 1. Try to get from new Store
+    let storedKey = await TauriStoreAdapter.getItem(KEY_STORAGE_NAME);
+
+    // 2. Migration: If not in Store, check legacy localStorage
+    if (!storedKey) {
+        const legacyKey = localStorage.getItem(KEY_STORAGE_NAME);
+        if (legacyKey) {
+            console.log('Migrating Master Key from localStorage to Tauri Store...');
+            storedKey = legacyKey;
+            // Save to new store
+            await TauriStoreAdapter.setItem(KEY_STORAGE_NAME, storedKey);
+            // Verify it was saved (optional but safe)
+            const verify = await TauriStoreAdapter.getItem(KEY_STORAGE_NAME);
+            if (verify === storedKey) {
+                // Remove from legacy
+                localStorage.removeItem(KEY_STORAGE_NAME);
+                console.log('Master Key migrated successfully. Removed from localStorage.');
+            }
+        }
+    }
 
     if (storedKey) {
         // Import existing key
@@ -28,7 +49,7 @@ async function getOrGenerateKey(): Promise<CryptoKey> {
         // Export and store
         const exported = await window.crypto.subtle.exportKey("raw", key);
         const keyString = btoa(String.fromCharCode(...new Uint8Array(exported)));
-        localStorage.setItem(KEY_STORAGE_NAME, keyString);
+        await TauriStoreAdapter.setItem(KEY_STORAGE_NAME, keyString);
 
         return key;
     }

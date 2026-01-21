@@ -106,7 +106,12 @@ onMounted(async () => {
   }
 
   const resizeObserver = new ResizeObserver(() => {
-    fitAndResize().catch(e => console.error("Resize failed", e))
+    fitAndResize().catch(e => {
+        // Ignore 'Session not found' errors which happen if resize triggers before connection is ready
+        if (typeof e === 'string' && e.includes('Session not found')) return
+        if (e instanceof Error && e.message.includes('Session not found')) return
+        console.error("Resize failed", e)
+    })
   })
 
   if (terminalContainer.value) {

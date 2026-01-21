@@ -2,6 +2,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { encrypt, decrypt } from '~/utils/security' // Assuming alias works, or relative path
+import { TauriStoreAdapter } from '~/utils/store-adapter'
 
 export interface Host {
     id: string
@@ -173,6 +174,6 @@ export const useHostsStore = defineStore('hosts', () => {
     }
 }, {
     persist: {
-        storage: localStorage,
+        storage: TauriStoreAdapter,
     },
 })

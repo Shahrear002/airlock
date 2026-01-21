@@ -13,6 +13,7 @@
     "fs:allow-document-write-recursive",
     "fs:allow-desktop-write-recursive",
     "fs:allow-appconfig-read-recursive",
-    "fs:allow-appconfig-write-recursive"
+    "fs:allow-appconfig-write-recursive",
+    "store:default"
   ]
 }
