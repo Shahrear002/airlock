@@ -12,14 +12,46 @@
     max-width: 100% !important;
 }
 
+/* Fix text-image overlap on small screens */
+.VPHero .container {
+    gap: 2rem !important;
+}
+
+.VPHero .image-container {
+    margin-top: 2rem !important;
+}
+
+/* Mobile responsive spacing */
+@media (max-width: 639px) {
+    .VPHero .container {
+        gap: 3rem !important;
+    }
+
+    .VPHero .image-container {
+        margin-top: 3rem !important;
+    }
+
+    .VPHero .main {
+        padding-bottom: 2rem !important;
+    }
+}
+
 @media (min-width: 640px) {
     .VPHero .image-src {
         max-height: 600px !important;
+    }
+
+    .VPHero .container {
+        gap: 3rem !important;
     }
 }
 
 @media (min-width: 960px) {
     .VPHero .image-src {
         max-height: 700px !important;
+    }
+
+    .VPHero .container {
+        gap: 4rem !important;
     }
 }

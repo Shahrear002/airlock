@@ -13,6 +13,8 @@
 
 ![Airlock Banner](Screenshot-1.png)
 
+📖 **[View Documentation](https://shahrear002.github.io/airlock/)** | 📥 **[Download Latest Release](https://github.com/Shahrear002/airlock/releases/latest)**
+
 ## ✨ Features
 
 - **🔒 Local-First Security**: All your host credentials and passwords are encrypted locally using **AES-256**. No data ever leaves your device unless you move it yourself.
