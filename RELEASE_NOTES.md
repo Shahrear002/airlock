@@ -1,3 +1,16 @@
+# Airlock v1.0.5 Release Notes
+
+This release brings significant improvements to terminal layout and usability.
+
+## 🛠 Fixes & Improvements
+
+### Terminal
+- **Layout Fix**: Resolved an issue where the terminal text was not utilizing the full width of the container. Commands like `sudo tail -f` now correctly use the entire screen width.
+- **Focus Fix**: Fixed a bug where the terminal would lose focus after pasting text via the context menu. Focus is now automatically restored to the terminal.
+- **Resize Logic**: Improved the resize observer to better handle window resizing and tab switching, ensuring the terminal always fits the available space.
+
+---
+
 # Airlock v1.0.4 Release Notes
 
 This release brings a powerhouse feature to Airlock: **Split Screen Terminal**! You can now manage multiple sessions side-by-side for maximum productivity.

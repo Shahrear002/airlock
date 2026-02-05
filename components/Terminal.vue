@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
 import 'xterm/css/xterm.css'
@@ -39,6 +39,17 @@ onClickOutside(contextMenuRef, () => {
     showContextMenu.value = false
 })
 
+// Ensure terminal fits when tab becomes active
+watch(() => tabsStore.activeTabId, async () => {
+    await nextTick()
+    // Small delay to allow layout to settle
+    setTimeout(() => {
+        if (terminalContainer.value && terminalContainer.value.clientWidth > 0) {
+            fitAndResize()
+        }
+    }, 50)
+})
+
 onMounted(async () => {
 // ... existing onMounted code ...
   term = new Terminal({
@@ -61,7 +72,7 @@ onMounted(async () => {
   
   if (terminalContainer.value) {
     term.open(terminalContainer.value)
-    fitAddon.fit()
+    // fitAddon.fit() // Handled by initial resize
   }
 
   term.onSelectionChange(() => {
@@ -105,38 +116,53 @@ onMounted(async () => {
   
   // Use ResizeObserver to handle container resize (window resize or layout changes)
   const fitAndResize = async () => {
-    if (!fitAddon || !term) return
+    if (!fitAddon || !term || !terminalContainer.value) return
+    
+    // Skip if hidden
+    if (terminalContainer.value.clientWidth === 0 || terminalContainer.value.clientHeight === 0) return
+
     fitAddon.fit()
     const { rows, cols } = term
+    
     try {
         await invoke('resize_pty', { id: props.sessionId, rows, cols })
+        // console.log(`Resized PTY to ${cols}x${rows}`)
     } catch (err) {
-        // console.warn('Failed to resize PTY, session might not be ready yet:', err)
-        // throw err
+        // console.warn('Failed to resize PTY:', err)
+        // Swallow error if session not ready, but usually we want to know
     }
   }
 
   const performInitialResize = async (retries = 10, delay = 500) => {
       for (let i = 0; i < retries; i++) {
           try {
-              await fitAndResize()
-              console.log('Initial PTY resize successful')
-              return
-          } catch (e) {
-              if (i < retries - 1) {
-                  await new Promise(resolve => setTimeout(resolve, delay))
+              if (terminalContainer.value && terminalContainer.value.clientWidth > 0) {
+                 await fitAndResize()
+                 // Only return if we actually did something? 
+                 // fitAndResize doesn't return value but we can assume success if no error from invoke (if session ready)
+                 // But simply running fit() is enough for frontend.
+                 console.log('Initial PTY resize successful')
+                 return
               }
+          } catch (e) {
+             // Ignore
           }
+           if (i < retries - 1) {
+              await new Promise(resolve => setTimeout(resolve, delay))
+           }
       }
       console.error('Failed to perform initial PTY resize after multiple attempts')
   }
 
   resizeObserver = new ResizeObserver(() => {
-    fitAndResize().catch(e => {
-        // Ignore 'Session not found' errors which happen if resize triggers before connection is ready
-        if (typeof e === 'string' && e.includes('Session not found')) return
-        if (e instanceof Error && e.message.includes('Session not found')) return
-        console.error("Resize failed", e)
+    // Debounce slightly?
+    requestAnimationFrame(() => {
+        fitAndResize().catch(e => {
+            // Ignore 'Session not found' errors which happen if resize triggers before connection is ready
+            if (typeof e === 'string' && e.includes('Session not found')) return
+            if (e instanceof Error && e.message.includes('Session not found')) return
+            console.error("Resize failed", e)
+        })
     })
   })
 
@@ -180,6 +206,7 @@ const handleCopy = async () => {
     if (selection) {
         await navigator.clipboard.writeText(selection)
     }
+    term?.focus()
 }
 
 const handlePaste = async () => {
@@ -192,6 +219,8 @@ const handlePaste = async () => {
         }
     } catch (err) {
         console.error('Failed to read clipboard', err)
+    } finally {
+        term?.focus()
     }
 }
 
