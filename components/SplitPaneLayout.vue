@@ -3,6 +3,7 @@ import { Splitpanes, Pane } from 'splitpanes'
 import 'splitpanes/dist/splitpanes.css'
 import { type LayoutNode, useTabsStore } from '~/stores/tabs'
 import Terminal from './Terminal.vue'
+import SftpBrowser from './SftpBrowser.vue'
 import { computed } from 'vue'
 
 const props = defineProps<{
@@ -22,9 +23,10 @@ const onResize = (event: any) => {
 
 <template>
   <div class="h-full w-full">
-      <!-- Leaf Node: Render Terminal -->
+      <!-- Leaf Node: Render Terminal or SFTP -->
       <div v-if="node.type === 'leaf'" class="h-full w-full relative group">
-          <Terminal :session-id="node.sessionId!" />
+          <Terminal v-if="!node.paneType || node.paneType === 'terminal'" :session-id="node.sessionId!" :connection-id="node.connectionId" />
+          <SftpBrowser v-else-if="node.paneType === 'sftp'" :session-id="node.sessionId!" :connection-id="node.connectionId" />
           
           <!-- Overlay to indicate focus (optional) -->
           <div 

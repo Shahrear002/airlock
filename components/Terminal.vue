@@ -8,12 +8,13 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useSessionsStore } from '~/stores/sessions'
 import { useSettingsStore } from '~/stores/settings'
 import { useTabsStore } from '~/stores/tabs'
-import { SplitSquareHorizontal, SplitSquareVertical, X, Copy, Clipboard } from 'lucide-vue-next'
+import { SplitSquareHorizontal, SplitSquareVertical, X, Copy, Clipboard, Folder } from 'lucide-vue-next'
 
 import { onClickOutside } from '@vueuse/core'
 
 const props = defineProps<{
-  sessionId: string
+  sessionId: string,
+  connectionId?: string
 }>()
 
 const sessionsStore = useSessionsStore()
@@ -82,12 +83,14 @@ onMounted(async () => {
 
   // Handle Input (Frontend -> Backend)
   term.onData((data) => {
-    invoke('send_ssh_input', { id: props.sessionId, data })
+    const backendId = props.connectionId || props.sessionId
+    invoke('send_ssh_input', { id: backendId, data })
       .catch(err => console.error('Failed to send input', err))
   })
 
   // Handle Output (Backend -> Frontend)
-  unlistenOutput = await listen<Uint8Array>(`ssh-output-${props.sessionId}`, (event) => {
+  const backendId = props.connectionId || props.sessionId
+  unlistenOutput = await listen<Uint8Array>(`ssh-output-${backendId}`, (event) => {
     // event.payload is Uint8Array (or array of numbers). xterm write accepts string or Uint8Array
     // We might need to convert if payload comes as number array from Tauri
     const data = event.payload
@@ -100,12 +103,12 @@ onMounted(async () => {
     }
   })
   
-  unlistenError = await listen<string>(`ssh-error-${props.sessionId}`, (event) => {
+  unlistenError = await listen<string>(`ssh-error-${backendId}`, (event) => {
       term?.write(`\r\n\x1b[31mError: ${event.payload}\x1b[0m\r\n`)
   })
 
   // Handle Exit (Backend -> Frontend)
-  unlistenExit = await listen<any>(`ssh-exit-${props.sessionId}`, (event) => {
+  unlistenExit = await listen<any>(`ssh-exit-${backendId}`, (event) => {
       // Small delay to let final output render?
       setTimeout(() => {
           // Remove session and pane
@@ -125,7 +128,8 @@ onMounted(async () => {
     const { rows, cols } = term
     
     try {
-        await invoke('resize_pty', { id: props.sessionId, rows, cols })
+        const backendId = props.connectionId || props.sessionId
+        await invoke('resize_pty', { id: backendId, rows, cols })
         // console.log(`Resized PTY to ${cols}x${rows}`)
     } catch (err) {
         // console.warn('Failed to resize PTY:', err)
@@ -214,7 +218,8 @@ const handlePaste = async () => {
     try {
         const text = await navigator.clipboard.readText()
         if (text) {
-             invoke('send_ssh_input', { id: props.sessionId, data: text })
+             const backendId = props.connectionId || props.sessionId
+             invoke('send_ssh_input', { id: backendId, data: text })
                 .catch(err => console.error('Failed to paste input', err))
         }
     } catch (err) {
@@ -225,7 +230,7 @@ const handlePaste = async () => {
 }
 
 
-const split = async (direction: 'horizontal' | 'vertical') => {
+const split = async (direction: 'horizontal' | 'vertical', paneType: 'terminal' | 'sftp' = 'terminal') => {
     closeContextMenu()
     // 1. Get current session info to replicate credentials (ideal) or just split with new empty/prompt?
     // For now, let's assume we want to "duplicate" the session or start a fresh one?
@@ -264,7 +269,8 @@ const split = async (direction: 'horizontal' | 'vertical') => {
     })
     
     // Split the pane
-    tabsStore.splitPane(props.sessionId, direction, newSessionId)
+    const connectionId = paneType === 'sftp' ? (props.connectionId || props.sessionId) : newSessionId;
+    tabsStore.splitPane(props.sessionId, direction, newSessionId, paneType, connectionId)
     
     // Note: It will show empty terminal.
     // TODO: Improve this flow to perhaps prompt for password if needed, or re-use credentials if cached.
@@ -306,11 +312,15 @@ const split = async (direction: 'horizontal' | 'vertical') => {
           </button>
           <div class="h-px bg-border my-0.5"></div>
 
-          <button @click="split('horizontal')" class="flex items-center gap-2 px-2 py-1.5 hover:bg-muted rounded-sm text-sm text-left">
+          <button @click="split('horizontal', 'terminal')" class="flex items-center gap-2 px-2 py-1.5 hover:bg-muted rounded-sm text-sm text-left">
               <SplitSquareVertical class="w-4 h-4" /> Split Horizontal
           </button>
-          <button @click="split('vertical')" class="flex items-center gap-2 px-2 py-1.5 hover:bg-muted rounded-sm text-sm text-left">
+          <button @click="split('vertical', 'terminal')" class="flex items-center gap-2 px-2 py-1.5 hover:bg-muted rounded-sm text-sm text-left">
                <SplitSquareHorizontal class="w-4 h-4" /> Split Vertical
+          </button>
+          <div class="h-px bg-border my-0.5"></div>
+          <button @click="split('vertical', 'sftp')" class="flex items-center gap-2 px-2 py-1.5 hover:bg-muted rounded-sm text-sm text-left text-blue-400">
+               <Folder class="w-4 h-4" /> Open SFTP Browser
           </button>
            <button @click="sessionsStore.removeSession(sessionId); tabsStore.removePane(sessionId)" class="flex items-center gap-2 px-2 py-1.5 hover:bg-destructive/10 hover:text-destructive rounded-sm text-sm text-left">
                <X class="w-4 h-4" /> Close Pane

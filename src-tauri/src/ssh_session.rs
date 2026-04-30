@@ -13,14 +13,16 @@ pub enum SshInput {
     Resize(u32, u32), // cols, rows
 }
 
-// Structure to hold the SSH session sender for writing data
-pub struct SshConnection {
-    pub tx: mpsc::UnboundedSender<SshInput>,
+// Structure to hold the SSH session sender and the client handle
+#[derive(Clone)]
+pub struct ActiveSession {
+    pub handle: Arc<Mutex<russh::client::Handle<Client>>>,
+    pub terminal_tx: Option<mpsc::UnboundedSender<SshInput>>,
 }
 
 // Global state to manage active connections
 pub struct AppState {
-    pub connections: Arc<Mutex<HashMap<String, SshConnection>>>,
+    pub connections: Arc<Mutex<HashMap<String, ActiveSession>>>,
 }
 
 impl AppState {
@@ -34,7 +36,8 @@ impl AppState {
 use async_trait::async_trait;
 
 // Russh Client Handler
-struct Client {}
+#[derive(Clone)]
+pub struct Client {}
 
 #[async_trait]
 impl client::Handler for Client {
@@ -86,7 +89,10 @@ pub async fn connect_and_stream(
     {
         let state = app_handle.state::<AppState>();
         let mut connections = state.connections.lock().await;
-        connections.insert(id.clone(), SshConnection { tx });
+        connections.insert(id.clone(), ActiveSession { 
+            handle: Arc::new(Mutex::new(session)),
+            terminal_tx: Some(tx) 
+        });
     }
 
     let id_clone = id.clone();
@@ -131,10 +137,12 @@ pub async fn connect_and_stream(
             }
         }
         
-        // Cleanup
+        // Cleanup - only remove terminal_tx, keep connection alive for other subsystems
         let state = app_handle_clone.state::<AppState>();
         let mut connections = state.connections.lock().await;
-        connections.remove(&id_clone);
+        if let Some(sess) = connections.get_mut(&id_clone) {
+            sess.terminal_tx = None;
+        }
     });
 
     Ok(())

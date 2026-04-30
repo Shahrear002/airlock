@@ -9,6 +9,8 @@ export interface LayoutNode {
     type: LayoutNodeType
     children?: LayoutNode[]
     sessionId?: string // Only for 'leaf'
+    connectionId?: string // The ID used for the backend connection (can be shared)
+    paneType?: 'terminal' | 'sftp' // What kind of pane is this?
     size?: number // Percentage for splitpanes
 }
 
@@ -32,7 +34,9 @@ export const useTabsStore = defineStore('tabs', () => {
             root: {
                 id: `node-${Date.now()}`,
                 type: 'leaf',
-                sessionId
+                sessionId,
+                connectionId: sessionId,
+                paneType: 'terminal'
             }
         }
         tabs.value.push(newTab)
@@ -90,7 +94,7 @@ export const useTabsStore = defineStore('tabs', () => {
         return null
     }
 
-    function splitPane(targetSessionId: string, direction: 'horizontal' | 'vertical', newSessionId: string) {
+    function splitPane(targetSessionId: string, direction: 'horizontal' | 'vertical', newSessionId: string, paneType: 'terminal' | 'sftp' = 'terminal', connectionId?: string) {
         const tab = tabs.value.find(t => t.id === activeTabId.value)
         if (!tab) return
 
@@ -107,19 +111,28 @@ export const useTabsStore = defineStore('tabs', () => {
         //   -> Leaf (original)
         //   -> Leaf (new)
 
+        const originalPaneType = node.paneType || 'terminal'
+        const originalConnectionId = node.connectionId || originalSessionId
+
         node.type = direction
         node.sessionId = undefined
+        node.connectionId = undefined
+        node.paneType = undefined
         node.children = [
             {
                 id: `node-${Date.now()}-1`,
                 type: 'leaf',
                 sessionId: originalSessionId,
+                connectionId: originalConnectionId,
+                paneType: originalPaneType,
                 size: 50
             },
             {
                 id: `node-${Date.now()}-2`,
                 type: 'leaf',
                 sessionId: newSessionId,
+                connectionId: connectionId || newSessionId,
+                paneType: paneType,
                 size: 50
             }
         ]
@@ -152,6 +165,8 @@ export const useTabsStore = defineStore('tabs', () => {
                     // Modify parent in place to become the child
                     parent.type = remainingChild.type
                     parent.sessionId = remainingChild.sessionId
+                    parent.connectionId = remainingChild.connectionId
+                    parent.paneType = remainingChild.paneType
                     parent.children = remainingChild.children
                     // parent.id = remainingChild.id 
                 }
