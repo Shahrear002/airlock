@@ -6,7 +6,7 @@ mod sftp;
 
 use tauri::Emitter;
 use ssh_session::{AppState, connect_and_stream, SshInput};
-use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download};
+use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer};
 
 #[tauri::command]
 async fn connect_ssh(
@@ -81,7 +81,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState::new())
-        .invoke_handler(tauri::generate_handler![connect_ssh, send_ssh_input, disconnect_ssh, resize_pty, sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download])
+        .invoke_handler(tauri::generate_handler![connect_ssh, send_ssh_input, disconnect_ssh, resize_pty, sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

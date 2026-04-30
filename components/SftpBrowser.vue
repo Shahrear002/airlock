@@ -33,6 +33,7 @@ const localError = ref('')
 // Transfer State
 const transferLoading = ref(false)
 const transferProgress = ref('')
+const activeTransferId = ref('')
 
 // Fake Drag & Drop State
 const draggedItem = ref<{ type: 'local'|'remote', name: string, is_dir: boolean } | null>(null)
@@ -190,34 +191,58 @@ const onMouseUp = (e: MouseEvent) => {
 const doDropLocal = async (item: {name: string, type: string}) => {
     transferLoading.value = true
     transferProgress.value = `Downloading ${item.name}...`
+    const tId = crypto.randomUUID()
+    activeTransferId.value = tId
+    
     try {
         const backendId = props.connectionId || props.sessionId
         const rPath = joinPath(remotePath.value, item.name)
         const lPath = joinPath(localPath.value, item.name)
         
-        await invoke('sftp_download', { id: backendId, remotePath: rPath, localPath: lPath })
+        await invoke('sftp_download', { id: backendId, transferId: tId, remotePath: rPath, localPath: lPath })
         loadLocalDir(localPath.value)
     } catch (e: any) {
-        alert("Download failed: " + e.toString())
+        if (!e.toString().includes('cancelled')) {
+            alert("Download failed: " + e.toString())
+        }
     } finally {
-        transferLoading.value = false
+        if (activeTransferId.value === tId) {
+            transferLoading.value = false
+            activeTransferId.value = ''
+        }
     }
 }
 
 const doDropRemote = async (item: {name: string, type: string}) => {
     transferLoading.value = true
     transferProgress.value = `Uploading ${item.name}...`
+    const tId = crypto.randomUUID()
+    activeTransferId.value = tId
+    
     try {
         const backendId = props.connectionId || props.sessionId
         const lPath = joinPath(localPath.value, item.name)
         const rPath = joinPath(remotePath.value, item.name)
         
-        await invoke('sftp_upload', { id: backendId, localPath: lPath, remotePath: rPath })
+        await invoke('sftp_upload', { id: backendId, transferId: tId, localPath: lPath, remotePath: rPath })
         loadRemoteDir(remotePath.value)
     } catch (e: any) {
-        alert("Upload failed: " + e.toString())
+        if (!e.toString().includes('cancelled')) {
+            alert("Upload failed: " + e.toString())
+        }
     } finally {
+        if (activeTransferId.value === tId) {
+            transferLoading.value = false
+            activeTransferId.value = ''
+        }
+    }
+}
+
+const cancelTransfer = async () => {
+    if (activeTransferId.value) {
+        await invoke('cancel_transfer', { transferId: activeTransferId.value })
         transferLoading.value = false
+        activeTransferId.value = ''
     }
 }
 </script>
@@ -246,7 +271,7 @@ const doDropRemote = async (item: {name: string, type: string}) => {
               <span class="text-gray-200 font-medium tracking-tight">Transferring File</span>
               <span class="text-gray-400 text-xs truncate">{{ transferProgress }}</span>
           </div>
-          <button @click="transferLoading = false" class="p-1.5 hover:bg-white/10 rounded-full text-gray-500 hover:text-gray-300 transition-colors ml-1" title="Dismiss notification">
+          <button @click="cancelTransfer" class="p-1.5 hover:bg-white/10 rounded-full text-gray-500 hover:text-red-400 transition-colors ml-1" title="Cancel transfer">
               <X class="w-4 h-4" />
           </button>
       </div>

@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tauri::{Emitter, Manager}; // Added Manager, Removed Listener
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 // Input types for the SSH loop
 pub enum SshInput {
@@ -23,12 +24,14 @@ pub struct ActiveSession {
 // Global state to manage active connections
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, ActiveSession>>>,
+    pub active_transfers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
+            active_transfers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
