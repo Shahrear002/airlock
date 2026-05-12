@@ -18,6 +18,7 @@
 ## ✨ Features
 
 - **🔒 Local-First Security**: All your host credentials and passwords are encrypted locally using **AES-256**. No data ever leaves your device unless you move it yourself.
+- **📂 SFTP File Transfer**: Integrated dual-pane file manager for seamless drag-and-drop transfers between local and remote systems. Support for recursive transfers and real-time progress tracking.
 - **📂 Smart Organization**: Group your servers with folders and nested hierarchies for easy access.
 - **💾 Portable Backups**: Export your entire configuration securely. Passwords are re-encrypted with a master backup password, allowing you to restore your setup on any machine (Windows, macOS, or Linux).
 - **⚡ Native Performance**: Powered by a Rust backend using `russh`, providing low-latency connections and resource efficiency.

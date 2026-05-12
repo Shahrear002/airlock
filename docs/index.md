@@ -21,6 +21,8 @@ features:
     details: Your credentials never leave your device. All sensitive data is encrypted at rest using AES-GCM.
   - title: Modern Experience
     details: Built with Tauri and Vue.js for a blazing fast, native-feeling application with a beautiful dark mode.
+  - title: SFTP File Transfer
+    details: Effortlessly transfer files with a dual-pane browser, drag-and-drop support, and recursive folder transfers.
   - title: Organized Workspace
     details: Group your hosts into folders, search instantly, and manage dozens of connections with ease.
 ---

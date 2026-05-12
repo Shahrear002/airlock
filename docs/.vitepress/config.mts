@@ -22,6 +22,7 @@ export default defineConfig({
                     { text: 'Getting Started', link: '/guide/getting-started' },
                     { text: 'Managing Hosts', link: '/guide/host-management' },
                     { text: 'Terminal Features', link: '/guide/terminal' },
+                    { text: 'SFTP File Transfer', link: '/guide/sftp' },
                     { text: 'Security & Encryption', link: '/guide/security' },
                     { text: 'Import & Export', link: '/guide/backup' }
                 ]
