@@ -1,3 +1,18 @@
+# Airlock v1.1.0 Release Notes
+
+This major update introduces integrated SFTP File Transfer capabilities, allowing you to manage files on your remote servers with ease.
+
+## ✨ New Features
+
+### SFTP File Transfer
+- **Dual-Pane Browser**: A new side-by-side view for local and remote file systems.
+- **Drag & Drop**: Intuitively transfer files and folders between your local machine and remote servers by dragging them across panes.
+- **Recursive Transfers**: Seamlessly upload or download entire folder structures.
+- **Transfer Controls**: Real-time progress tracking with the ability to cancel active transfers.
+- **Navigation**: Full support for navigating both local and remote directory trees.
+
+---
+
 # Airlock v1.0.5 Release Notes
 
 This release brings significant improvements to terminal layout and usability.
