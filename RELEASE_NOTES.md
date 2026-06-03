@@ -1,3 +1,15 @@
+# Airlock v1.1.1 Release Notes
+
+This minor update brings usability improvements and visual feedback to the new SFTP File Transfer feature.
+
+## 🛠 Fixes & Improvements
+
+### SFTP File Transfer
+- **Progress Tracking**: Added a real-time progress bar for file transfers, displaying upload/download percentage and current file status.
+- **Drag & Drop Fix**: Resolved an issue where single-clicking files or folders incorrectly triggered the drag-and-drop preview state.
+
+---
+
 # Airlock v1.1.0 Release Notes
 
 This major update introduces integrated SFTP File Transfer capabilities, allowing you to manage files on your remote servers with ease.
