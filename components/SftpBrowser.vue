@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { FileCode, Folder, RefreshCw, X, Server, HardDrive, Loader2 } from 'lucide-vue-next'
 import { useTabsStore } from '~/stores/tabs'
 
@@ -33,10 +34,19 @@ const localError = ref('')
 // Transfer State
 const transferLoading = ref(false)
 const transferProgress = ref('')
+const transferTotal = ref(0)
+const transferTransferred = ref(0)
+const transferPercentage = computed(() => {
+    if (transferTotal.value === 0) return 0;
+    return Math.round((transferTransferred.value / transferTotal.value) * 100);
+})
 const activeTransferId = ref('')
+
+let unlistenProgress: (() => void) | null = null;
 
 // Fake Drag & Drop State
 const draggedItem = ref<{ type: 'local'|'remote', name: string, is_dir: boolean } | null>(null)
+const pendingDragItem = ref<{ type: 'local'|'remote', name: string, is_dir: boolean, startX: number, startY: number } | null>(null)
 const mousePos = ref({ x: 0, y: 0 })
 const hoverTarget = ref<'local'|'remote'|null>(null)
 
@@ -78,6 +88,15 @@ const loadLocalDir = async (path: string) => {
 }
 
 onMounted(async () => {
+    unlistenProgress = await listen('transfer-progress', (event: any) => {
+        const payload = event.payload;
+        if (payload.transfer_id === activeTransferId.value) {
+            transferTotal.value = payload.total;
+            transferTransferred.value = payload.transferred;
+            transferProgress.value = payload.file_name;
+        }
+    });
+
     // Load local home dir
     try {
         const home = await invoke<string>('get_local_home_dir')
@@ -91,6 +110,12 @@ onMounted(async () => {
     setTimeout(() => {
         loadRemoteDir(remotePath.value)
     }, 1000)
+})
+
+onUnmounted(() => {
+    if (unlistenProgress) {
+        unlistenProgress();
+    }
 })
 
 const navigateRemote = (name: string) => {
@@ -143,8 +168,7 @@ const activatePane = () => {
 const onMouseDown = (event: MouseEvent, type: 'local'|'remote', name: string, is_dir: boolean) => {
     if (event.button !== 0) return // Only process left click
     
-    draggedItem.value = { type, name, is_dir }
-    mousePos.value = { x: event.clientX, y: event.clientY }
+    pendingDragItem.value = { type, name, is_dir, startX: event.clientX, startY: event.clientY }
     
     // Bind global listeners to track drag anywhere on screen
     window.addEventListener('mousemove', onMouseMove, { capture: true })
@@ -155,7 +179,20 @@ const onMouseDown = (event: MouseEvent, type: 'local'|'remote', name: string, is
 }
 
 const onMouseMove = (e: MouseEvent) => {
+    if (pendingDragItem.value && !draggedItem.value) {
+        const dx = e.clientX - pendingDragItem.value.startX
+        const dy = e.clientY - pendingDragItem.value.startY
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            draggedItem.value = {
+                type: pendingDragItem.value.type,
+                name: pendingDragItem.value.name,
+                is_dir: pendingDragItem.value.is_dir
+            }
+        }
+    }
+
     if (!draggedItem.value) return
+    
     mousePos.value = { x: e.clientX, y: e.clientY }
     
     // Determine which pane we are hovering over
@@ -176,6 +213,7 @@ const onMouseUp = (e: MouseEvent) => {
     const target = hoverTarget.value
     
     draggedItem.value = null
+    pendingDragItem.value = null
     hoverTarget.value = null
     
     // If dropped in a different pane, execute transfer
@@ -191,6 +229,8 @@ const onMouseUp = (e: MouseEvent) => {
 const doDropLocal = async (item: {name: string, type: string}) => {
     transferLoading.value = true
     transferProgress.value = `Downloading ${item.name}...`
+    transferTotal.value = 0
+    transferTransferred.value = 0
     const tId = crypto.randomUUID()
     activeTransferId.value = tId
     
@@ -216,6 +256,8 @@ const doDropLocal = async (item: {name: string, type: string}) => {
 const doDropRemote = async (item: {name: string, type: string}) => {
     transferLoading.value = true
     transferProgress.value = `Uploading ${item.name}...`
+    transferTotal.value = 0
+    transferTransferred.value = 0
     const tId = crypto.randomUUID()
     activeTransferId.value = tId
     
@@ -263,15 +305,24 @@ const cancelTransfer = async () => {
 
       <!-- Transfer Notification Toast -->
       <div v-if="transferLoading" 
-           class="absolute bottom-6 right-6 z-50 bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.5)] pl-5 pr-2 py-3 rounded-2xl flex items-center gap-4 text-sm transform transition-all animate-in slide-in-from-bottom-5 fade-in">
+           class="absolute bottom-6 right-6 z-50 bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.5)] pl-5 pr-2 py-3 rounded-2xl flex items-center gap-4 text-sm transform transition-all animate-in slide-in-from-bottom-5 fade-in min-w-[300px]">
           <div class="h-10 w-10 rounded-full bg-blue-500/10 flex items-center justify-center border border-blue-500/20 shrink-0">
               <Loader2 class="w-5 h-5 animate-spin text-blue-400" />
           </div>
-          <div class="flex flex-col min-w-[150px] max-w-[250px]">
-              <span class="text-gray-200 font-medium tracking-tight">Transferring File</span>
-              <span class="text-gray-400 text-xs truncate">{{ transferProgress }}</span>
+          <div class="flex flex-col flex-1 max-w-[250px]">
+              <div class="flex items-center justify-between mb-0.5">
+                  <span class="text-gray-200 font-medium tracking-tight">Transferring</span>
+                  <span v-if="transferTotal > 0" class="text-xs text-blue-400 font-medium">{{ transferPercentage }}%</span>
+              </div>
+              <span class="text-gray-400 text-xs truncate mb-1.5">{{ transferProgress }}</span>
+              <div class="w-full bg-black/40 rounded-full h-1.5 overflow-hidden" v-if="transferTotal > 0">
+                  <div class="bg-blue-500 h-full rounded-full transition-all duration-300 ease-out" :style="{ width: transferPercentage + '%' }"></div>
+              </div>
+              <div class="w-full bg-black/40 rounded-full h-1.5 overflow-hidden" v-else>
+                  <div class="bg-blue-500 h-full rounded-full animate-pulse w-full"></div>
+              </div>
           </div>
-          <button @click="cancelTransfer" class="p-1.5 hover:bg-white/10 rounded-full text-gray-500 hover:text-red-400 transition-colors ml-1" title="Cancel transfer">
+          <button @click="cancelTransfer" class="p-1.5 hover:bg-white/10 rounded-full text-gray-500 hover:text-red-400 transition-colors shrink-0 ml-1" title="Cancel transfer">
               <X class="w-4 h-4" />
           </button>
       </div>
