@@ -8,7 +8,7 @@ mod vpn;
 use tauri::Emitter;
 use ssh_session::{AppState, connect_and_stream, SshInput};
 use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer};
-use vpn::{VpnState, VpnHandle, start_vpn_tunnel, stop_vpn_tunnel, get_vpn_status};
+use vpn::{VpnState, ActiveTunnel, start_vpn_tunnel, stop_vpn_tunnel, get_vpn_status, start_openconnect_tunnel, send_mfa_token};
 
 #[tauri::command]
 async fn connect_ssh(
@@ -19,7 +19,6 @@ async fn connect_ssh(
     user: String,
     password: Option<String>,
 ) -> Result<(), String> {
-    // Spawn off the connection task so we don't block the command
     let app_clone = app.clone();
     tokio::spawn(async move {
         if let Err(e) = connect_and_stream(id.clone(), host, port, user, password, app_clone).await {
@@ -33,13 +32,13 @@ async fn connect_ssh(
 async fn send_ssh_input(
     state: tauri::State<'_, AppState>,
     id: String,
-    data: String, 
+    data: String,
 ) -> Result<(), String> {
     let connections = state.connections.lock().await;
     if let Some(conn) = connections.get(&id) {
-         if let Some(tx) = &conn.terminal_tx {
-             let _ = tx.send(SshInput::Data(data.into_bytes()));
-         }
+        if let Some(tx) = &conn.terminal_tx {
+            let _ = tx.send(SshInput::Data(data.into_bytes()));
+        }
     }
     Ok(())
 }
@@ -85,37 +84,48 @@ fn main() {
         .manage(AppState::new())
         .manage(VpnState::new())
         .invoke_handler(tauri::generate_handler![
+            // SSH
             connect_ssh,
             send_ssh_input,
             disconnect_ssh,
             resize_pty,
+            // SFTP
             sftp_list_dir,
             local_list_dir,
             get_local_home_dir,
             sftp_upload,
             sftp_download,
             cancel_transfer,
-            // VPN commands
+            // VPN — WireGuard
             start_vpn_tunnel,
             stop_vpn_tunnel,
             get_vpn_status,
+            // VPN — OpenConnect
+            start_openconnect_tunnel,
+            send_mfa_token,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // Best-effort VPN teardown on app close
                 use tauri::Manager;
                 let vpn_state = window.state::<VpnState>();
-                let handle = vpn_state.handle.clone();
+                let tunnel = vpn_state.tunnel.clone();
                 tauri::async_runtime::block_on(async move {
-                    let mut h: tokio::sync::MutexGuard<'_, Option<VpnHandle>> = handle.lock().await;
-                    if let Some(vpn_handle) = h.take() {
-                        vpn_handle.outbound_task.abort();
-                        vpn_handle.inbound_task.abort();
-                        if let Some(k) = vpn_handle.keepalive_task {
-                            k.abort();
+                    let mut t: tokio::sync::MutexGuard<'_, Option<ActiveTunnel>> = tunnel.lock().await;
+                    match t.take() {
+                        Some(ActiveTunnel::WireGuard(handle)) => {
+                            handle.outbound_task.abort();
+                            handle.inbound_task.abort();
+                            if let Some(k) = handle.keepalive_task { k.abort(); }
+                            drop(handle._adapter);
+                            log::info!("WireGuard tunnel torn down on app close");
                         }
-                        drop(vpn_handle._adapter);
-                        log::info!("VPN tunnel torn down on app close");
+                        Some(ActiveTunnel::OpenConnect(handle)) => {
+                            handle.status_task.abort();
+                            let mut child = handle.child.lock().await;
+                            let _ = child.kill().await;
+                            log::info!("OpenConnect process killed on app close");
+                        }
+                        None => {}
                     }
                 });
             }

@@ -12,8 +12,30 @@ import { X, PanelLeft, PanelLeftClose } from 'lucide-vue-next'
 const sessionsStore = useSessionsStore()
 const tabsStore = useTabsStore()
 const vpnStore = useVpnStore()
-const vpnConfigsStore = useVpnConfigsStore() // initialises persistence
+const vpnConfigsStore = useVpnConfigsStore()
 const isSidebarOpen = ref(true)
+
+// ── Resizable sidebar ─────────────────────────────────────────────────────────
+const sidebarWidth = ref(260)
+const isResizing = ref(false)
+
+function startResize(e: MouseEvent) {
+    isResizing.value = true
+    const startX = e.clientX
+    const startWidth = sidebarWidth.value
+
+    const onMove = (ev: MouseEvent) => {
+        const delta = ev.clientX - startX
+        sidebarWidth.value = Math.max(200, Math.min(500, startWidth + delta))
+    }
+    const onUp = () => {
+        isResizing.value = false
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+}
 
 const handleConnect = async (connectionDetails: any) => {
     let id = `session-${Date.now()}`
@@ -63,8 +85,21 @@ onMounted(async () => {
 <template>
   <div class="flex h-screen bg-background text-foreground font-sans overflow-hidden">
     <!-- Sidebar -->
-    <div v-show="isSidebarOpen" class="flex-shrink-0 h-full">
+    <div
+      v-show="isSidebarOpen"
+      class="flex-shrink-0 h-full relative flex"
+      :style="{ width: sidebarWidth + 'px' }"
+    >
         <HostSidebar @connect="handleConnect" />
+        <!-- Resize handle -->
+        <div
+            class="absolute right-0 top-0 h-full w-1 cursor-col-resize z-50 group flex items-center justify-center"
+            :class="{ 'bg-primary/40': isResizing }"
+            @mousedown.prevent="startResize"
+        >
+            <div class="w-0.5 h-12 rounded-full transition-colors"
+                 :class="isResizing ? 'bg-primary' : 'bg-border group-hover:bg-primary/60'" />
+        </div>
     </div>
 
     <!-- Main Content -->

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useVpnConfigsStore } from '~/stores/vpn_configs'
+import { useVpnConfigsStore, type OpenConnectProtocolHint } from '~/stores/vpn_configs'
 import { useVpnStore } from '~/stores/vpn'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import {
     Shield, ShieldCheck, ShieldOff, ShieldAlert, Loader2,
-    Plus, Pencil, Trash2, ChevronRight, Wifi, WifiOff, X
+    Plus, Pencil, Trash2, Wifi, X, KeyRound, Globe, Lock
 } from 'lucide-vue-next'
 import Dialog from '@/components/ui/dialog/Dialog.vue'
 import DialogContent from '@/components/ui/dialog/DialogContent.vue'
@@ -19,133 +21,265 @@ import Label from '@/components/ui/label/Label.vue'
 const vpnConfigsStore = useVpnConfigsStore()
 const vpnStore = useVpnStore()
 
-// ── Dialog state ─────────────────────────────────────────────────────────────
+// ── Dialog state ──────────────────────────────────────────────────────────────
 const isDialogOpen = ref(false)
 const editingId = ref<string | null>(null)
 const confirmDeleteId = ref<string | null>(null)
+const isSaving = ref(false)
+const formError = ref('')
 
+// ── Add / Edit form ───────────────────────────────────────────────────────────
 const form = ref({
     name: '',
-    config: '',
+    protocol: 'wireguard' as 'wireguard' | 'openconnect',
+    // WireGuard
+    wg_config: '',
+    // OpenConnect
+    server_url: '',
+    port: 443 as number | undefined,
+    username: '',
+    password: '',
+    protocol_hint: 'auto' as OpenConnectProtocolHint,
 })
-const formError = ref('')
-const isSaving = ref(false)
 
 // ── Connection state ──────────────────────────────────────────────────────────
 const connectingId = ref<string | null>(null)
 const connectionError = ref('')
 
+// ── 2FA dialog ────────────────────────────────────────────────────────────────
+const isMfaDialogOpen = ref(false)
+const mfaPrompt = ref('')
+const mfaToken = ref('')
+const mfaSubmitting = ref(false)
+
+// Listen for MFA prompts from backend
+listen<{ prompt: string }>('vpn-mfa-required', (event) => {
+    mfaPrompt.value = event.payload.prompt || 'Enter your authentication token'
+    mfaToken.value = ''
+    isMfaDialogOpen.value = true
+})
+
+// ── Certificate trust dialog ──────────────────────────────────────────────────
+const isCertDialogOpen = ref(false)
+const certFingerprint = ref('')
+const certServer = ref('')
+const certProfileId = ref<string | null>(null)
+const certTrusting = ref(false)
+
+listen<{ fingerprint: string; server: string }>('vpn-cert-verify', (event) => {
+    certFingerprint.value = event.payload.fingerprint
+    certServer.value = event.payload.server
+    isCertDialogOpen.value = true
+    // Reset VPN status since the process exited
+    vpnStore.status = 'disconnected'
+})
+
+async function trustCertAndReconnect() {
+    if (!certProfileId.value || !certFingerprint.value) return
+    certTrusting.value = true
+    try {
+        // 1. Save fingerprint to profile
+        vpnConfigsStore.saveCertFingerprint(certProfileId.value, certFingerprint.value)
+        isCertDialogOpen.value = false
+        // 2. Reconnect with the saved fingerprint
+        await connectProfile(certProfileId.value)
+    } finally {
+        certTrusting.value = false
+    }
+}
+
 // ── Computed ──────────────────────────────────────────────────────────────────
 const isEditing = computed(() => editingId.value !== null)
 
-const activeProfileId = computed(() => {
-    // We track which profile is active by matching against the store status
-    return vpnStore.status === 'connected' ? (vpnStore as any).activeProfileId ?? null : null
-})
+const statusDotClass = computed(() => ({
+    'bg-green-500': vpnStore.status === 'connected',
+    'bg-amber-400 animate-pulse': vpnStore.status === 'connecting',
+    'bg-red-500': vpnStore.status === 'error',
+    'bg-zinc-600': vpnStore.status === 'disconnected',
+}))
 
-const statusColor = computed(() => {
-    switch (vpnStore.status) {
-        case 'connected': return 'text-green-400'
-        case 'connecting': return 'text-amber-400'
-        case 'error': return 'text-red-400'
-        default: return 'text-zinc-400'
-    }
-})
+const statusColor = computed(() => ({
+    'text-green-400': vpnStore.status === 'connected',
+    'text-amber-400': vpnStore.status === 'connecting',
+    'text-red-400': vpnStore.status === 'error',
+    'text-zinc-400': vpnStore.status === 'disconnected',
+}))
 
-const statusDotClass = computed(() => {
-    switch (vpnStore.status) {
-        case 'connected': return 'bg-green-500'
-        case 'connecting': return 'bg-amber-400 animate-pulse'
-        case 'error': return 'bg-red-500'
-        default: return 'bg-zinc-500'
-    }
-})
+const statusLabel = computed(() => ({
+    connected: 'Connected',
+    connecting: 'Connecting...',
+    error: 'Connection Error',
+    disconnected: 'Disconnected',
+}[vpnStore.status]))
 
-const statusLabel = computed(() => {
-    switch (vpnStore.status) {
-        case 'connected': return 'Connected'
-        case 'connecting': return 'Connecting...'
-        case 'error': return 'Error'
-        default: return 'Disconnected'
-    }
-})
+const openConnectProtocols: { value: OpenConnectProtocolHint; label: string; description: string }[] = [
+    { value: 'auto', label: 'Auto-detect', description: 'Let OpenConnect detect the server protocol' },
+    { value: 'anyconnect', label: 'Cisco AnyConnect', description: 'Cisco ASA, Cisco FTD' },
+    { value: 'gp', label: 'GlobalProtect', description: 'Palo Alto Networks' },
+    { value: 'pulse', label: 'Pulse / Ivanti', description: 'Pulse Secure, Ivanti Connect' },
+    { value: 'f5', label: 'F5 BIG-IP', description: 'F5 Access Policy Manager' },
+    { value: 'fortinet', label: 'Fortinet', description: 'FortiGate FortiSSL' },
+]
 
-// ── Methods ───────────────────────────────────────────────────────────────────
-function openAddDialog() {
+// ── Dialog helpers ────────────────────────────────────────────────────────────
+function resetForm() {
     editingId.value = null
-    form.value = { name: '', config: '' }
     formError.value = ''
+    form.value = {
+        name: '',
+        protocol: 'wireguard',
+        wg_config: '',
+        server_url: '',
+        port: 443,
+        username: '',
+        password: '',
+        protocol_hint: 'auto',
+    }
+}
+
+function openAddDialog() {
+    resetForm()
     isDialogOpen.value = true
 }
 
 async function openEditDialog(id: string) {
-    editingId.value = id
     const profile = vpnConfigsStore.profiles.find(p => p.id === id)
     if (!profile) return
-    const decrypted = await vpnConfigsStore.getDecryptedConfig(id)
-    form.value = { name: profile.name, config: decrypted }
+    editingId.value = id
     formError.value = ''
+
+    if (profile.protocol === 'wireguard') {
+        const decrypted = await vpnConfigsStore.getDecryptedConfig(id)
+        form.value = {
+            name: profile.name,
+            protocol: 'wireguard',
+            wg_config: decrypted,
+            server_url: '',
+            username: '',
+            password: '',
+            protocol_hint: 'auto',
+        }
+    } else {
+        form.value = {
+            name: profile.name,
+            protocol: 'openconnect',
+            wg_config: '',
+            server_url: profile.server_url ?? '',
+            port: profile.port ?? 443,
+            username: profile.username ?? '',
+            password: '',
+            protocol_hint: profile.protocol_hint ?? 'auto',
+        }
+    }
     isDialogOpen.value = true
 }
 
 async function saveProfile() {
     formError.value = ''
+
     if (!form.value.name.trim()) {
         formError.value = 'Profile name is required.'
         return
     }
-    if (!form.value.config.trim()) {
-        formError.value = 'WireGuard configuration is required.'
-        return
-    }
-    // Basic validation — must have [Interface] and [Peer]
-    if (!form.value.config.includes('[Interface]') || !form.value.config.includes('[Peer]')) {
-        formError.value = 'Invalid WireGuard config — must contain [Interface] and [Peer] sections.'
-        return
+
+    if (form.value.protocol === 'wireguard') {
+        if (!form.value.wg_config.trim()) {
+            formError.value = 'WireGuard configuration is required.'
+            return
+        }
+        if (!form.value.wg_config.includes('[Interface]') || !form.value.wg_config.includes('[Peer]')) {
+            formError.value = 'Invalid WireGuard config — must contain [Interface] and [Peer] sections.'
+            return
+        }
+    } else {
+        if (!form.value.server_url.trim()) {
+            formError.value = 'Server URL is required.'
+            return
+        }
+        if (!form.value.username.trim()) {
+            formError.value = 'Username is required.'
+            return
+        }
+        if (!isEditing.value && !form.value.password.trim()) {
+            formError.value = 'Password is required.'
+            return
+        }
     }
 
     isSaving.value = true
     try {
-        if (isEditing.value && editingId.value) {
-            await vpnConfigsStore.updateProfile(editingId.value, form.value.name.trim(), form.value.config.trim())
+        if (form.value.protocol === 'wireguard') {
+            if (isEditing.value && editingId.value) {
+                await vpnConfigsStore.updateWireGuardProfile(editingId.value, form.value.name.trim(), form.value.wg_config.trim())
+            } else {
+                await vpnConfigsStore.addWireGuardProfile(form.value.name.trim(), form.value.wg_config.trim())
+            }
         } else {
-            await vpnConfigsStore.addProfile(form.value.name.trim(), form.value.config.trim())
+            if (isEditing.value && editingId.value) {
+                await vpnConfigsStore.updateOpenConnectProfile(
+                    editingId.value,
+                    form.value.name.trim(),
+                    form.value.server_url.trim(),
+                    form.value.port || undefined,
+                    form.value.username.trim(),
+                    form.value.password,
+                    form.value.protocol_hint,
+                )
+            } else {
+                await vpnConfigsStore.addOpenConnectProfile(
+                    form.value.name.trim(),
+                    form.value.server_url.trim(),
+                    form.value.port || undefined,
+                    form.value.username.trim(),
+                    form.value.password.trim(),
+                    form.value.protocol_hint,
+                )
+            }
         }
         isDialogOpen.value = false
+        resetForm()
     } finally {
         isSaving.value = false
     }
 }
 
-function confirmDelete(id: string) {
-    confirmDeleteId.value = id
-}
-
-function doDelete() {
-    if (confirmDeleteId.value) {
-        // If this profile is connected, disconnect first
-        if (vpnStore.status === 'connected') {
-            vpnStore.disconnect().catch(() => {})
-        }
-        vpnConfigsStore.removeProfile(confirmDeleteId.value)
-        confirmDeleteId.value = null
-    }
-}
-
+// ── Connect / Disconnect ──────────────────────────────────────────────────────
 async function connectProfile(id: string) {
-    if (vpnStore.status === 'connected') {
-        // Disconnect current first
+    const profile = vpnConfigsStore.profiles.find(p => p.id === id)
+    if (!profile) return
+
+    // Disconnect any existing tunnel first
+    if (vpnStore.status !== 'disconnected') {
         await vpnStore.disconnect().catch(() => {})
     }
+
     connectingId.value = id
     connectionError.value = ''
+    certProfileId.value = id  // track which profile is connecting for cert trust dialog
+
     try {
-        const config = await vpnConfigsStore.getDecryptedConfig(id)
-        if (!config) throw new Error('Failed to decrypt VPN configuration')
-        ;(vpnStore as any).activeProfileId = id
-        await vpnStore.connect(config)
+        if (profile.protocol === 'wireguard') {
+            const config = await vpnConfigsStore.getDecryptedConfig(id)
+            if (!config) throw new Error('Failed to decrypt WireGuard configuration')
+            vpnStore.activeProfileId = id
+            await vpnStore.connect(config)
+        } else {
+            // OpenConnect
+            const password = await vpnConfigsStore.getDecryptedPassword(id)
+            vpnStore.activeProfileId = id
+            await invoke('start_openconnect_tunnel', {
+                server: profile.server_url ?? '',
+                port: profile.port ?? null,
+                servercert: profile.servercert ?? null,
+                username: profile.username ?? '',
+                password,
+                protocolHint: profile.protocol_hint ?? 'auto',
+            })
+            // Status will be updated via vpn-status-changed event from backend
+        }
     } catch (e: any) {
         connectionError.value = typeof e === 'string' ? e : (e?.message ?? 'Connection failed')
+        vpnStore.activeProfileId = null
     } finally {
         connectingId.value = null
     }
@@ -155,10 +289,41 @@ async function disconnect() {
     connectionError.value = ''
     try {
         await vpnStore.disconnect()
-        ;(vpnStore as any).activeProfileId = null
+        vpnStore.activeProfileId = null
     } catch (e: any) {
         connectionError.value = typeof e === 'string' ? e : (e?.message ?? 'Disconnect failed')
     }
+}
+
+// ── 2FA ───────────────────────────────────────────────────────────────────────
+async function submitMfaToken() {
+    if (!mfaToken.value.trim()) return
+    mfaSubmitting.value = true
+    try {
+        await invoke('send_mfa_token', { token: mfaToken.value.trim() })
+        isMfaDialogOpen.value = false
+        mfaToken.value = ''
+    } catch (e: any) {
+        connectionError.value = typeof e === 'string' ? e : (e?.message ?? 'Failed to submit token')
+    } finally {
+        mfaSubmitting.value = false
+    }
+}
+
+// ── Delete ────────────────────────────────────────────────────────────────────
+function confirmDelete(id: string) { confirmDeleteId.value = id }
+function doDelete() {
+    if (!confirmDeleteId.value) return
+    if (vpnStore.status !== 'disconnected' && vpnStore.activeProfileId === confirmDeleteId.value) {
+        vpnStore.disconnect().catch(() => {})
+    }
+    vpnConfigsStore.removeProfile(confirmDeleteId.value)
+    confirmDeleteId.value = null
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function protocolLabel(hint: OpenConnectProtocolHint | undefined) {
+    return openConnectProtocols.find(p => p.value === (hint ?? 'auto'))?.label ?? 'Auto-detect'
 }
 </script>
 
@@ -180,7 +345,7 @@ async function disconnect() {
         </button>
     </div>
 
-    <!-- ── Global VPN Status Banner ───────────────────────────────────────── -->
+    <!-- ── Status Banner ─────────────────────────────────────────────────── -->
     <div
         class="mx-3 mt-3 rounded-lg border px-3 py-2.5 flex-shrink-0 transition-all"
         :class="{
@@ -201,14 +366,13 @@ async function disconnect() {
                 <Loader2 v-if="vpnStore.status === 'connecting'" class="w-3 h-3 animate-spin" :class="statusColor" />
             </div>
             <button
-                v-if="vpnStore.status === 'connected'"
+                v-if="vpnStore.status !== 'disconnected' && vpnStore.status !== 'connecting'"
                 @click="disconnect"
                 class="text-xs px-2 py-0.5 rounded border border-red-500/40 text-red-400 hover:bg-red-500/10 transition-colors"
             >
                 Disconnect
             </button>
         </div>
-        <!-- Error message -->
         <p v-if="connectionError" class="text-xs text-red-400 mt-1.5 leading-snug break-words">
             {{ connectionError }}
         </p>
@@ -226,12 +390,10 @@ async function disconnect() {
             </div>
             <div>
                 <p class="text-sm font-medium text-foreground">No VPN profiles</p>
-                <p class="text-xs text-muted-foreground mt-0.5">Add a WireGuard config to get started</p>
+                <p class="text-xs text-muted-foreground mt-0.5">Add a WireGuard or OpenConnect config</p>
             </div>
-            <button
-                @click="openAddDialog"
-                class="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-            >
+            <button @click="openAddDialog"
+                class="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
                 Add Profile
             </button>
         </div>
@@ -240,108 +402,150 @@ async function disconnect() {
         <div
             v-for="profile in vpnConfigsStore.profiles"
             :key="profile.id"
-            class="group rounded-lg border transition-all"
+            class="rounded-lg border transition-all overflow-hidden"
             :class="{
-                'border-green-500/50 bg-green-500/5': vpnStore.status === 'connected' && (vpnStore as any).activeProfileId === profile.id,
-                'border-border bg-muted/20 hover:border-border/80 hover:bg-muted/30': !(vpnStore.status === 'connected' && (vpnStore as any).activeProfileId === profile.id),
+                'border-green-500/50 bg-green-500/5': vpnStore.status === 'connected' && vpnStore.activeProfileId === profile.id,
+                'border-border bg-muted/20 hover:bg-muted/30': !(vpnStore.status === 'connected' && vpnStore.activeProfileId === profile.id),
             }"
         >
-            <div class="flex items-center gap-3 px-3 py-3">
-                <!-- Icon -->
-                <div class="flex-shrink-0">
-                    <ShieldCheck
-                        v-if="vpnStore.status === 'connected' && (vpnStore as any).activeProfileId === profile.id"
-                        class="w-5 h-5 text-green-400"
-                    />
-                    <Shield v-else class="w-5 h-5 text-muted-foreground group-hover:text-foreground transition-colors" />
-                </div>
+            <!-- Row 1: Icon + Name + Badge + Edit/Delete -->
+            <div class="flex items-center gap-2 px-3 pt-2.5 pb-1">
+                <ShieldCheck v-if="vpnStore.status === 'connected' && vpnStore.activeProfileId === profile.id"
+                    class="w-4 h-4 text-green-400 flex-shrink-0" />
+                <Shield v-else class="w-4 h-4 text-muted-foreground flex-shrink-0" />
 
-                <!-- Name -->
-                <div class="flex-1 min-w-0">
-                    <p class="text-sm font-medium truncate">{{ profile.name }}</p>
-                    <p class="text-xs text-muted-foreground">WireGuard · Encrypted</p>
-                </div>
+                <p class="text-sm font-medium truncate flex-1">{{ profile.name }}</p>
 
-                <!-- Actions -->
-                <div class="flex items-center gap-1 flex-shrink-0">
-                    <!-- Connect / Disconnect button -->
-                    <button
-                        v-if="vpnStore.status === 'connected' && (vpnStore as any).activeProfileId === profile.id"
-                        @click="disconnect"
-                        class="text-xs px-2.5 py-1 rounded-md border border-red-500/40 text-red-400 hover:bg-red-500/10 transition-colors"
-                    >
-                        Disconnect
-                    </button>
-                    <button
-                        v-else
-                        @click="connectProfile(profile.id)"
-                        :disabled="connectingId === profile.id || vpnStore.status === 'connecting'"
-                        class="text-xs px-2.5 py-1 rounded-md border border-primary/40 text-primary hover:bg-primary/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                    >
-                        <Loader2 v-if="connectingId === profile.id" class="w-3 h-3 animate-spin" />
-                        <Wifi v-else class="w-3 h-3" />
-                        {{ connectingId === profile.id ? 'Connecting...' : 'Connect' }}
-                    </button>
+                <!-- Protocol badge -->
+                <span
+                    class="text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+                    :class="{
+                        'bg-blue-500/20 text-blue-400 border border-blue-500/30': profile.protocol === 'wireguard',
+                        'bg-purple-500/20 text-purple-400 border border-purple-500/30': profile.protocol === 'openconnect',
+                    }"
+                >
+                    {{ profile.protocol === 'wireguard' ? 'WG' : 'OC' }}
+                </span>
 
-                    <!-- Edit -->
-                    <button
-                        @click="openEditDialog(profile.id)"
-                        class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                        title="Edit profile"
-                    >
-                        <Pencil class="w-3.5 h-3.5" />
-                    </button>
+                <button @click="openEditDialog(profile.id)"
+                    class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex-shrink-0">
+                    <Pencil class="w-3 h-3" />
+                </button>
+                <button @click="confirmDelete(profile.id)"
+                    class="p-1 rounded text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors flex-shrink-0">
+                    <Trash2 class="w-3 h-3" />
+                </button>
+            </div>
 
-                    <!-- Delete -->
-                    <button
-                        @click="confirmDelete(profile.id)"
-                        class="p-1.5 rounded-md text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                        title="Delete profile"
-                    >
-                        <Trash2 class="w-3.5 h-3.5" />
-                    </button>
-                </div>
+            <!-- Row 2: Subtitle -->
+            <p class="text-xs text-muted-foreground truncate px-3 pb-2">
+                <template v-if="profile.protocol === 'wireguard'">WireGuard · Encrypted config</template>
+                <template v-else>{{ profile.server_url }}<span v-if="profile.port && profile.port !== 443">:{{ profile.port }}</span> · {{ protocolLabel(profile.protocol_hint) }}</template>
+            </p>
+
+            <!-- Row 3: Connect / Disconnect full-width button -->
+            <div class="px-2 pb-2.5">
+                <!-- Disconnect (active profile) -->
+                <button
+                    v-if="vpnStore.status === 'connected' && vpnStore.activeProfileId === profile.id"
+                    @click="disconnect"
+                    class="w-full text-xs py-1.5 rounded-md border border-red-500/40 bg-red-500/5 text-red-400 hover:bg-red-500/10 transition-colors font-medium"
+                >
+                    ⏻ Disconnect
+                </button>
+                <!-- Connecting (this profile) -->
+                <button
+                    v-else-if="connectingId === profile.id"
+                    disabled
+                    class="w-full text-xs py-1.5 rounded-md border border-border bg-muted/30 text-muted-foreground flex items-center justify-center gap-1.5"
+                >
+                    <Loader2 class="w-3 h-3 animate-spin" />
+                    Connecting...
+                </button>
+                <!-- Connect -->
+                <button
+                    v-else
+                    @click="connectProfile(profile.id)"
+                    :disabled="vpnStore.status === 'connecting'"
+                    class="w-full text-xs py-1.5 rounded-md border border-primary/40 bg-primary/5 text-primary hover:bg-primary/10 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    Connect
+                </button>
             </div>
         </div>
     </div>
 
     <!-- ── Add / Edit Dialog ──────────────────────────────────────────────── -->
     <Dialog v-model:open="isDialogOpen">
-        <DialogContent class="sm:max-w-[520px] max-h-[90vh] flex flex-col">
+        <DialogContent class="w-[95vw] max-w-[540px] max-h-[85vh] flex flex-col">
             <DialogHeader class="flex-shrink-0">
                 <DialogTitle class="flex items-center gap-2">
                     <Shield class="w-4 h-4 text-primary" />
                     {{ isEditing ? 'Edit VPN Profile' : 'Add VPN Profile' }}
                 </DialogTitle>
                 <DialogDescription>
-                    Paste your WireGuard <code class="bg-muted px-1 rounded text-xs">.conf</code> file content below.
-                    Your config is encrypted with AES-256 before being stored.
+                    Passwords and keys are encrypted with AES-256 before being stored.
                 </DialogDescription>
             </DialogHeader>
 
-            <div class="flex flex-col gap-4 py-2 flex-1 overflow-y-auto">
+            <div class="flex flex-col gap-4 py-2 flex-1 overflow-y-auto pr-1">
+
                 <!-- Profile name -->
                 <div class="flex flex-col gap-1.5">
-                    <Label htmlFor="vpn-profile-name">Profile Name</Label>
-                    <Input
-                        id="vpn-profile-name"
-                        v-model="form.name"
-                        placeholder="e.g. Work VPN, Home Server, Mullvad US"
-                        @keyup.enter="saveProfile"
-                    />
+                    <Label htmlFor="vpn-name">Profile Name</Label>
+                    <Input id="vpn-name" v-model="form.name" placeholder="e.g. Work VPN, Mullvad US, Home Lab" />
                 </div>
 
-                <!-- WireGuard config -->
-                <div class="flex flex-col gap-1.5 flex-1">
-                    <div class="flex items-center justify-between">
-                        <Label htmlFor="vpn-config-text">WireGuard Configuration</Label>
-                        <span class="text-xs text-muted-foreground">Paste your .conf file</span>
+                <!-- Protocol selector (only when adding) -->
+                <div v-if="!isEditing" class="flex flex-col gap-1.5">
+                    <Label>Protocol</Label>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button
+                            @click="form.protocol = 'wireguard'"
+                            class="flex flex-col items-start gap-1 p-3 rounded-lg border transition-all text-left"
+                            :class="{
+                                'border-blue-500/60 bg-blue-500/10': form.protocol === 'wireguard',
+                                'border-border hover:border-border/80 hover:bg-muted/30': form.protocol !== 'wireguard',
+                            }"
+                        >
+                            <div class="flex items-center gap-2">
+                                <KeyRound class="w-4 h-4" :class="form.protocol === 'wireguard' ? 'text-blue-400' : 'text-muted-foreground'" />
+                                <span class="text-sm font-semibold" :class="form.protocol === 'wireguard' ? 'text-blue-400' : ''">WireGuard</span>
+                                <span class="text-[10px] font-bold px-1 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30">WG</span>
+                            </div>
+                            <p class="text-xs text-muted-foreground">Paste a .conf file — for personal VPNs, Mullvad, ProtonVPN</p>
+                        </button>
+
+                        <button
+                            @click="form.protocol = 'openconnect'"
+                            class="flex flex-col items-start gap-1 p-3 rounded-lg border transition-all text-left"
+                            :class="{
+                                'border-purple-500/60 bg-purple-500/10': form.protocol === 'openconnect',
+                                'border-border hover:border-border/80 hover:bg-muted/30': form.protocol !== 'openconnect',
+                            }"
+                        >
+                            <div class="flex items-center gap-2">
+                                <Globe class="w-4 h-4" :class="form.protocol === 'openconnect' ? 'text-purple-400' : 'text-muted-foreground'" />
+                                <span class="text-sm font-semibold" :class="form.protocol === 'openconnect' ? 'text-purple-400' : ''">OpenConnect</span>
+                                <span class="text-[10px] font-bold px-1 py-0.5 rounded bg-purple-500/20 text-purple-400 border border-purple-500/30">OC</span>
+                            </div>
+                            <p class="text-xs text-muted-foreground">URL + credentials — for Cisco, GlobalProtect, Fortinet</p>
+                        </button>
                     </div>
-                    <textarea
-                        id="vpn-config-text"
-                        v-model="form.config"
-                        rows="12"
-                        placeholder="[Interface]
+                </div>
+
+                <!-- ── WireGuard fields ──────────────────────────────────── -->
+                <template v-if="form.protocol === 'wireguard'">
+                    <div class="flex flex-col gap-1.5">
+                        <div class="flex items-center justify-between">
+                            <Label htmlFor="wg-config">WireGuard Configuration</Label>
+                            <span class="text-xs text-muted-foreground">Paste your .conf file</span>
+                        </div>
+                        <textarea
+                            id="wg-config"
+                            v-model="form.wg_config"
+                            rows="7"
+                            placeholder="[Interface]
 PrivateKey = <your-private-key>
 Address = 10.8.0.2/24
 DNS = 1.1.1.1
@@ -351,37 +555,115 @@ PublicKey = <server-public-key>
 Endpoint = vpn.example.com:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25"
-                        class="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono resize-none ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 text-foreground placeholder:text-muted-foreground/50 leading-relaxed"
-                    />
-                    <div class="flex items-start gap-1.5 text-xs text-muted-foreground">
-                        <ShieldCheck class="w-3.5 h-3.5 text-green-500 flex-shrink-0 mt-0.5" />
-                        <span>Encrypted with AES-256-GCM before being stored. Never saved in plaintext.</span>
+                            class="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono resize-y focus:outline-none focus:ring-2 focus:ring-ring text-foreground placeholder:text-muted-foreground/50 leading-relaxed min-h-[140px] max-h-[260px]"
+                        />
                     </div>
-                    <div v-if="formError" class="text-xs text-red-400 flex items-center gap-1.5">
-                        <X class="w-3.5 h-3.5 flex-shrink-0" />
-                        {{ formError }}
-                    </div>
-                </div>
+                </template>
 
-                <!-- Key requirement notice -->
-                <div class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-400 leading-relaxed flex-shrink-0">
-                    <strong>WireGuard requires cryptographic keys.</strong> Your VPN provider (Mullvad, ProtonVPN, etc.)
-                    or server admin will give you a ready-to-use <code class="bg-amber-500/20 px-1 rounded">.conf</code> file
-                    — simply paste it above. There is no way to connect to WireGuard with just an IP and port.
+                <!-- ── OpenConnect fields ───────────────────────────────── -->
+                <template v-else>
+                    <!-- Server URL + Port -->
+                    <div class="flex gap-2">
+                        <div class="flex flex-col gap-1.5 flex-1">
+                            <Label htmlFor="oc-server">Server URL</Label>
+                            <Input id="oc-server" v-model="form.server_url"
+                                placeholder="vpn.company.com" />
+                        </div>
+                        <div class="flex flex-col gap-1.5 w-24">
+                            <Label htmlFor="oc-port">Port</Label>
+                            <Input id="oc-port" v-model.number="form.port" type="number"
+                                min="1" max="65535" placeholder="443" />
+                        </div>
+                    </div>
+
+                    <!-- Protocol hint -->
+                    <div class="flex flex-col gap-1.5">
+                        <Label htmlFor="oc-protocol">Server Protocol</Label>
+                        <select id="oc-protocol" v-model="form.protocol_hint"
+                            class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
+                            <option v-for="p in openConnectProtocols" :key="p.value" :value="p.value">
+                                {{ p.label }} — {{ p.description }}
+                            </option>
+                        </select>
+                        <p class="text-xs text-muted-foreground">Choose Auto-detect if unsure — OpenConnect will probe the server.</p>
+                    </div>
+
+                    <!-- Username + Password -->
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="flex flex-col gap-1.5">
+                            <Label htmlFor="oc-user">Username</Label>
+                            <Input id="oc-user" v-model="form.username" placeholder="john.doe" />
+                        </div>
+                        <div class="flex flex-col gap-1.5">
+                            <Label htmlFor="oc-pass">Password</Label>
+                            <Input id="oc-pass" type="password" v-model="form.password"
+                                :placeholder="isEditing ? 'Leave blank to keep' : 'Password'" />
+                        </div>
+                    </div>
+
+                    <!-- 2FA note -->
+                    <div class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-400 leading-relaxed flex items-start gap-2">
+                        <Lock class="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                        <span>If your VPN requires a 2FA / MFA token, a prompt will appear automatically when you connect. You do not need to configure it here.</span>
+                    </div>
+                </template>
+
+                <!-- Validation error -->
+                <div v-if="formError" class="text-xs text-red-400 flex items-center gap-1.5 flex-shrink-0">
+                    <X class="w-3.5 h-3.5 flex-shrink-0" />
+                    {{ formError }}
                 </div>
             </div>
 
-            <DialogFooter class="flex-shrink-0 pt-2">
+            <DialogFooter class="flex-shrink-0 pt-2 border-t border-border">
                 <Button variant="outline" @click="isDialogOpen = false">Cancel</Button>
                 <Button @click="saveProfile" :disabled="isSaving" class="gap-2">
                     <Loader2 v-if="isSaving" class="w-3.5 h-3.5 animate-spin" />
-                    {{ isEditing ? 'Update' : 'Save Profile' }}
+                    {{ isEditing ? 'Update Profile' : 'Save Profile' }}
                 </Button>
             </DialogFooter>
         </DialogContent>
     </Dialog>
 
-    <!-- ── Delete Confirmation Dialog ────────────────────────────────────── -->
+    <!-- ── 2FA Token Dialog ───────────────────────────────────────────────── -->
+    <Dialog v-model:open="isMfaDialogOpen">
+        <DialogContent class="sm:max-w-[380px]">
+            <DialogHeader>
+                <DialogTitle class="flex items-center gap-2">
+                    <Lock class="w-4 h-4 text-amber-400" />
+                    Two-Factor Authentication
+                </DialogTitle>
+                <DialogDescription>
+                    {{ mfaPrompt }}
+                </DialogDescription>
+            </DialogHeader>
+            <div class="py-3 flex flex-col gap-3">
+                <div class="flex flex-col gap-1.5">
+                    <Label htmlFor="mfa-token">Authentication Token</Label>
+                    <Input
+                        id="mfa-token"
+                        v-model="mfaToken"
+                        placeholder="123456"
+                        class="font-mono text-center text-lg tracking-widest"
+                        @keyup.enter="submitMfaToken"
+                        autofocus
+                    />
+                </div>
+                <p class="text-xs text-muted-foreground">
+                    Enter the one-time code from your authenticator app (Duo, Google Authenticator, etc.)
+                </p>
+            </div>
+            <DialogFooter>
+                <Button variant="outline" @click="isMfaDialogOpen = false">Cancel</Button>
+                <Button @click="submitMfaToken" :disabled="!mfaToken.trim() || mfaSubmitting" class="gap-2">
+                    <Loader2 v-if="mfaSubmitting" class="w-3.5 h-3.5 animate-spin" />
+                    Submit Token
+                </Button>
+            </DialogFooter>
+        </DialogContent>
+    </Dialog>
+
+    <!-- ── Delete Confirm Dialog ─────────────────────────────────────────── -->
     <Dialog :open="!!confirmDeleteId" @update:open="v => { if (!v) confirmDeleteId = null }">
         <DialogContent class="sm:max-w-[360px]">
             <DialogHeader>
@@ -390,7 +672,7 @@ PersistentKeepalive = 25"
                     Delete Profile
                 </DialogTitle>
                 <DialogDescription>
-                    Are you sure? This VPN profile will be permanently deleted. This action cannot be undone.
+                    This VPN profile will be permanently deleted. This cannot be undone.
                 </DialogDescription>
             </DialogHeader>
             <DialogFooter class="mt-4">
@@ -398,6 +680,37 @@ PersistentKeepalive = 25"
                 <Button variant="destructive" @click="doDelete" class="gap-2">
                     <Trash2 class="w-3.5 h-3.5" />
                     Delete
+                </Button>
+            </DialogFooter>
+        </DialogContent>
+    </Dialog>
+
+    <!-- ── Trust Certificate Dialog ──────────────────────────────────────── -->
+    <Dialog v-model:open="isCertDialogOpen">
+        <DialogContent class="sm:max-w-[420px]">
+            <DialogHeader>
+                <DialogTitle class="flex items-center gap-2 text-amber-400">
+                    <Shield class="w-4 h-4" />
+                    Untrusted Certificate
+                </DialogTitle>
+                <DialogDescription>
+                    The VPN server <strong class="text-foreground">{{ certServer }}</strong> is using a self-signed certificate that could not be verified.
+                </DialogDescription>
+            </DialogHeader>
+            <div class="py-3 space-y-3">
+                <div class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-400 leading-relaxed">
+                    <p class="font-semibold mb-1">Certificate Fingerprint</p>
+                    <p class="font-mono break-all text-[11px] text-foreground/80">{{ certFingerprint }}</p>
+                </div>
+                <p class="text-xs text-muted-foreground">
+                    Only trust this certificate if you recognise this server and its fingerprint. Once trusted, Airlock will automatically accept it on future connections.
+                </p>
+            </div>
+            <DialogFooter>
+                <Button variant="outline" @click="isCertDialogOpen = false">Cancel</Button>
+                <Button @click="trustCertAndReconnect" :disabled="certTrusting" class="gap-2 bg-amber-500 hover:bg-amber-600 text-black">
+                    <Loader2 v-if="certTrusting" class="w-3.5 h-3.5 animate-spin" />
+                    Trust &amp; Connect
                 </Button>
             </DialogFooter>
         </DialogContent>

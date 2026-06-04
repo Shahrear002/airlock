@@ -38,7 +38,23 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["wintun.dll"],
+    "resources": [
+      "wintun.dll",
+      "openconnect.exe",
+      "libopenconnect-5.dll",
+      "libcrypto-3-x64.dll",
+      "libssl-3-x64.dll",
+      "libgmp-10.dll",
+      "libhogweed-6.dll",
+      "libnettle-8.dll",
+      "libintl-8.dll",
+      "liblz4.dll",
+      "libxml2-2.dll",
+      "libstoken-1.dll",
+      "iconv.dll",
+      "zlib1.dll",
+      "vpnc-script-win.js"
+    ],
     "macOS": {
       "minimumSystemVersion": "10.13"
     },

@@ -22,8 +22,11 @@ export const TauriStoreAdapter = {
 
             // Safety Check: If we are trying to save an empty/default state, but the disk has data, bad things are happening.
             // Pinia hydration might be triggering a save of initial state before load completes.
-            if (key === 'hosts' && value === '{"hosts":[]}' && oldValue && oldValue.length > 20) {
-                console.warn(`[StoreAdapter] PREVENTING OVEWRITE: Attempted to save empty hosts over existing data (len ${oldValue.length}). Skipping.`);
+            if (
+                (key === 'hosts' && value === '{"hosts":[]}' && oldValue && oldValue.length > 20) ||
+                (key === 'vpn_configs' && value === '{"profiles":[]}' && oldValue && oldValue.length > 20)
+            ) {
+                console.warn(`[StoreAdapter] PREVENTING OVEWRITE: Attempted to save empty state for ${key} over existing data (len ${oldValue.length}). Skipping.`);
                 return;
             }
 

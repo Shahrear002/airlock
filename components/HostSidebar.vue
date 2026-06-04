@@ -177,7 +177,7 @@ async function connectToHost(hostId: string) {
 </script>
 
 <template>
-  <div class="flex flex-col h-full bg-card border-r border-border" style="width: 260px; min-width: 260px;">
+  <div class="flex flex-col h-full w-full bg-card border-r border-border overflow-hidden">
 
     <!-- ── App Brand ──────────────────────────────────────────────────────── -->
     <div class="flex items-center gap-2 px-4 pt-4 pb-3 flex-shrink-0">
