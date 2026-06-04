@@ -9,9 +9,9 @@ export interface Host {
     name: string
     type: 'host' | 'folder'
     parentId: string | null
-    host?: string // Optional for folders
-    port?: number // Optional for folders
-    username?: string // Optional for folders
+    host?: string
+    port?: number
+    username?: string
     encrypted_password?: string
     private_key_path?: string
 }
@@ -48,7 +48,7 @@ export const useHostsStore = defineStore('hosts', () => {
             port: hostData.port,
             username: hostData.username,
             encrypted_password,
-            private_key_path: hostData.private_key_path
+            private_key_path: hostData.private_key_path,
         })
     }
 
@@ -75,10 +75,9 @@ export const useHostsStore = defineStore('hosts', () => {
 
         const host = { ...hosts.value[index], ...updates }
 
-        // If a new password is provided, re-encrypt it
         if (updates.password !== undefined) {
             host.encrypted_password = await encrypt(updates.password)
-            delete (host as any).password // Don't store plain password
+            delete (host as any).password
         }
 
         hosts.value[index] = host
@@ -113,12 +112,9 @@ export const useHostsStore = defineStore('hosts', () => {
                     const plainPass = await decrypt(host.encrypted_password)
                     // @ts-ignore - Temporary property for export
                     host.password = plainPass
-                    // Remove encrypted version
                     delete (host as any).encrypted_password
                 } catch (e) {
                     console.error(`Failed to decrypt password for host ${host.name} during export`, e)
-                    // Keep encrypted password or clear it? 
-                    // Safest to clear it so we don't export useless local-encrypted data
                     delete (host as any).encrypted_password
                 }
             }
@@ -130,7 +126,6 @@ export const useHostsStore = defineStore('hosts', () => {
         const processedHosts: Host[] = []
 
         for (const item of newHosts) {
-            // Validate basic structure
             if (!item.id || !item.type) continue
 
             const host: Host = {
@@ -142,14 +137,11 @@ export const useHostsStore = defineStore('hosts', () => {
                 port: item.port,
                 username: item.username,
                 private_key_path: item.private_key_path,
-                // encrypted_password will be set below
             }
 
-            // If incoming data has 'password', encrypt it locally
             if (item.password) {
                 host.encrypted_password = await encrypt(item.password)
             } else if (item.encrypted_password) {
-                // If it's legacy data from same machine, using it might work.
                 host.encrypted_password = item.encrypted_password
             }
 

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useSessionsStore } from '~/stores/sessions'
 import { useTabsStore } from '~/stores/tabs'
+import { useVpnStore } from '~/stores/vpn'
+import { useVpnConfigsStore } from '~/stores/vpn_configs'
 import { invoke } from '@tauri-apps/api/core'
 import HostSidebar from './components/HostSidebar.vue'
 import SplitPaneLayout from './components/SplitPaneLayout.vue'
@@ -9,6 +11,8 @@ import { X, PanelLeft, PanelLeftClose } from 'lucide-vue-next'
 
 const sessionsStore = useSessionsStore()
 const tabsStore = useTabsStore()
+const vpnStore = useVpnStore()
+const vpnConfigsStore = useVpnConfigsStore() // initialises persistence
 const isSidebarOpen = ref(true)
 
 const handleConnect = async (connectionDetails: any) => {
@@ -51,6 +55,9 @@ const handleConnect = async (connectionDetails: any) => {
         // For now, let it stay open so user sees error output
     }
 }
+onMounted(async () => {
+    await vpnStore.init()
+})
 </script>
 
 <template>

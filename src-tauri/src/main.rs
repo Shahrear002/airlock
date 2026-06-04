@@ -3,10 +3,12 @@
 
 mod ssh_session;
 mod sftp;
+mod vpn;
 
 use tauri::Emitter;
 use ssh_session::{AppState, connect_and_stream, SshInput};
 use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer};
+use vpn::{VpnState, VpnHandle, start_vpn_tunnel, stop_vpn_tunnel, get_vpn_status};
 
 #[tauri::command]
 async fn connect_ssh(
@@ -81,7 +83,43 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState::new())
-        .invoke_handler(tauri::generate_handler![connect_ssh, send_ssh_input, disconnect_ssh, resize_pty, sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer])
+        .manage(VpnState::new())
+        .invoke_handler(tauri::generate_handler![
+            connect_ssh,
+            send_ssh_input,
+            disconnect_ssh,
+            resize_pty,
+            sftp_list_dir,
+            local_list_dir,
+            get_local_home_dir,
+            sftp_upload,
+            sftp_download,
+            cancel_transfer,
+            // VPN commands
+            start_vpn_tunnel,
+            stop_vpn_tunnel,
+            get_vpn_status,
+        ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // Best-effort VPN teardown on app close
+                use tauri::Manager;
+                let vpn_state = window.state::<VpnState>();
+                let handle = vpn_state.handle.clone();
+                tauri::async_runtime::block_on(async move {
+                    let mut h: tokio::sync::MutexGuard<'_, Option<VpnHandle>> = handle.lock().await;
+                    if let Some(vpn_handle) = h.take() {
+                        vpn_handle.outbound_task.abort();
+                        vpn_handle.inbound_task.abort();
+                        if let Some(k) = vpn_handle.keepalive_task {
+                            k.abort();
+                        }
+                        drop(vpn_handle._adapter);
+                        log::info!("VPN tunnel torn down on app close");
+                    }
+                });
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
