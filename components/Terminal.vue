@@ -132,8 +132,8 @@ onMounted(async () => {
         await invoke('resize_pty', { id: backendId, rows, cols })
         // console.log(`Resized PTY to ${cols}x${rows}`)
     } catch (err) {
-        // console.warn('Failed to resize PTY:', err)
-        // Swallow error if session not ready, but usually we want to know
+        // Throw error so performInitialResize can retry
+        throw err
     }
   }
 
@@ -174,10 +174,10 @@ onMounted(async () => {
     resizeObserver.observe(terminalContainer.value)
   }
 
-  // Also fit immediately (though observer will likely fire initially), with retry
-  setTimeout(() => {
+  // Ensure DOM is fully rendered before calculating initial fit
+  nextTick(() => {
       performInitialResize()
-  }, 100)
+  })
 })
 
 onBeforeUnmount(() => {
