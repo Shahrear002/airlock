@@ -477,7 +477,7 @@ function protocolLabel(hint: OpenConnectProtocolHint | undefined) {
 
     <!-- ── Add / Edit Dialog ──────────────────────────────────────────────── -->
     <Dialog v-model:open="isDialogOpen">
-        <DialogContent class="w-[95vw] max-w-[540px] max-h-[85vh] flex flex-col">
+        <DialogContent class="w-[95vw] max-w-[540px] max-h-[85vh] flex flex-col resize overflow-hidden min-w-[320px] min-h-[400px]">
             <DialogHeader class="flex-shrink-0">
                 <DialogTitle class="flex items-center gap-2">
                     <Shield class="w-4 h-4 text-primary" />
@@ -488,7 +488,7 @@ function protocolLabel(hint: OpenConnectProtocolHint | undefined) {
                 </DialogDescription>
             </DialogHeader>
 
-            <div class="flex flex-col gap-4 py-2 flex-1 overflow-y-auto pr-1">
+            <div class="flex flex-col gap-4 py-2 px-1 flex-1 overflow-y-auto">
 
                 <!-- Profile name -->
                 <div class="flex flex-col gap-1.5">
