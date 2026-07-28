@@ -1,3 +1,14 @@
+# Airlock v1.1.2 Release Notes
+
+This patch release fixes a synchronization issue with the terminal dimensions.
+
+## 🐛 Bug Fixes
+
+### Terminal
+- **PTY Initialization Sync**: Fixed an issue where the terminal canvas dimensions were out of sync with the remote server's PTY on startup. Full-screen applications (like `vim`, `nano`, `htop`) now open instantly in full screen without requiring a manual window resize.
+
+---
+
 # Airlock v1.1.1 Release Notes
 
 This minor update brings usability improvements and visual feedback to the new SFTP File Transfer feature.
