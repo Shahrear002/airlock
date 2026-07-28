@@ -19,9 +19,11 @@ import SidebarTreeItem from './SidebarTreeItem.vue'
 import SettingsDialog from './SettingsDialog.vue'
 import VpnConfigsPanel from './VpnConfigsPanel.vue'
 import { TauriStoreAdapter } from '~/utils/store-adapter'
+import { useSettingsStore } from '~/stores/settings'
 
 const hostsStore = useHostsStore()
 const vpnStore = useVpnStore()
+const settingsStore = useSettingsStore()
 
 // ── Active tab ────────────────────────────────────────────────────────────────
 const activeTab = ref<'hosts' | 'vpn'>('hosts')
@@ -177,22 +179,22 @@ async function connectToHost(hostId: string) {
 </script>
 
 <template>
-  <div class="flex flex-col h-full w-full bg-card border-r border-border overflow-hidden">
-
-    <!-- ── App Brand ──────────────────────────────────────────────────────── -->
-    <div class="flex items-center gap-2 px-4 pt-4 pb-3 flex-shrink-0">
-        <TerminalIcon class="w-5 h-5 text-primary" />
-        <span class="text-lg font-bold tracking-tight text-primary">Airlock</span>
-    </div>
+  <div 
+    class="flex flex-col h-full w-full transition-colors duration-300"
+    :class="settingsStore.appTheme === 'glass' ? 'glass-panel' : 'bg-card border-r border-border overflow-hidden'"
+  >
 
     <!-- ── Tabs ───────────────────────────────────────────────────────────── -->
-    <div class="flex gap-1 px-3 pb-2 flex-shrink-0">
+    <div class="flex gap-1 px-3 pb-2 pt-2 flex-shrink-0">
         <button
             @click="activeTab = 'hosts'"
             class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-colors"
-            :class="activeTab === 'hosts'
-                ? 'bg-muted text-foreground'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'"
+            :class="[
+                activeTab === 'hosts' && settingsStore.appTheme !== 'glass' ? 'bg-muted text-foreground' : '',
+                activeTab !== 'hosts' && settingsStore.appTheme !== 'glass' ? 'text-muted-foreground hover:text-foreground hover:bg-muted/50' : '',
+                activeTab === 'hosts' && settingsStore.appTheme === 'glass' ? 'bg-white/10 text-white' : '',
+                activeTab !== 'hosts' && settingsStore.appTheme === 'glass' ? 'text-white/40 hover:bg-white/5 hover:text-white' : ''
+            ]"
         >
             <ServerIcon class="w-3.5 h-3.5" />
             Hosts
@@ -200,9 +202,12 @@ async function connectToHost(hostId: string) {
         <button
             @click="activeTab = 'vpn'"
             class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-colors relative"
-            :class="activeTab === 'vpn'
-                ? 'bg-muted text-foreground'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'"
+            :class="[
+                activeTab === 'vpn' && settingsStore.appTheme !== 'glass' ? 'bg-muted text-foreground' : '',
+                activeTab !== 'vpn' && settingsStore.appTheme !== 'glass' ? 'text-muted-foreground hover:text-foreground hover:bg-muted/50' : '',
+                activeTab === 'vpn' && settingsStore.appTheme === 'glass' ? 'bg-white/10 text-white' : '',
+                activeTab !== 'vpn' && settingsStore.appTheme === 'glass' ? 'text-white/40 hover:bg-white/5 hover:text-white' : ''
+            ]"
         >
             <Shield class="w-3.5 h-3.5" />
             VPN
@@ -217,13 +222,8 @@ async function connectToHost(hostId: string) {
     <!-- ── Hosts Panel ────────────────────────────────────────────────────── -->
     <div v-if="activeTab === 'hosts'" class="flex flex-col flex-1 min-h-0">
 
-        <!-- Explorer heading -->
-        <div class="px-4 mb-1 flex-shrink-0">
-            <span class="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Explorer</span>
-        </div>
-
         <!-- Tree -->
-        <div class="flex-1 overflow-y-auto px-3">
+        <div class="flex-1 overflow-y-auto px-2">
             <div v-if="hostsStore.hosts.length === 0" class="text-xs text-muted-foreground italic px-1 py-2">
                 No hosts saved.
             </div>
@@ -243,20 +243,21 @@ async function connectToHost(hostId: string) {
         </div>
 
         <!-- Footer actions -->
-        <div class="border-t border-border px-3 py-2 flex gap-1.5 flex-shrink-0">
+        <div class="border-t px-3 py-2 flex gap-1.5 flex-shrink-0" :class="settingsStore.appTheme === 'glass' ? 'border-white/10' : 'border-border'">
             <!-- Add Host -->
             <Dialog v-model:open="isAddModalOpen">
                 <button
                     @click="resetForms(); isAddModalOpen = true"
-                    class="flex-1 flex items-center justify-center gap-1 text-xs py-1.5 px-2 rounded-md border border-border hover:bg-muted transition-colors"
+                    class="flex-1 flex items-center justify-center gap-1 text-xs py-1.5 px-2 rounded-md border transition-colors"
+                    :class="settingsStore.appTheme === 'glass' ? 'border-white/10 hover:bg-white/5 text-white/80 hover:text-white' : 'border-border hover:bg-muted'"
                 >
                     <Plus class="w-3.5 h-3.5" />
                     Host
                 </button>
-                <DialogContent class="sm:max-w-[440px]">
+                <DialogContent class="sm:max-w-[440px]" :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.8)]' : ''">
                     <DialogHeader>
-                        <DialogTitle>{{ editingHostId ? 'Edit Host' : 'Add SSH Host' }}</DialogTitle>
-                        <DialogDescription>
+                        <DialogTitle :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]' : ''">{{ editingHostId ? 'Edit Host' : 'Add SSH Host' }}</DialogTitle>
+                        <DialogDescription :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/60' : ''">
                             Credentials are encrypted locally before being stored.
                         </DialogDescription>
                     </DialogHeader>
@@ -264,9 +265,10 @@ async function connectToHost(hostId: string) {
                     <div class="flex flex-col gap-3 py-3">
                         <!-- Folder -->
                         <div class="flex flex-col gap-1.5">
-                            <Label htmlFor="hf-folder">Folder</Label>
+                            <Label htmlFor="hf-folder" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Folder</Label>
                             <select id="hf-folder" v-model="newHost.parentId"
-                                class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
+                                class="flex h-9 w-full rounded-md border px-3 py-1 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                                :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white focus:!outline-none focus:!ring-2 focus:!ring-[#2D8CFF]/40' : 'border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring'">
                                 <option :value="null">Root (None)</option>
                                 <option v-for="f in formattedFolders" :key="f.id" :value="f.id">{{ f.displayName }}</option>
                             </select>
@@ -274,39 +276,39 @@ async function connectToHost(hostId: string) {
 
                         <!-- Label -->
                         <div class="flex flex-col gap-1.5">
-                            <Label htmlFor="hf-name">Label</Label>
-                            <Input id="hf-name" v-model="newHost.name" placeholder="Production Server" />
+                            <Label htmlFor="hf-name" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Label</Label>
+                            <Input id="hf-name" v-model="newHost.name" placeholder="Production Server" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                         </div>
 
                         <!-- Host + Port side by side -->
                         <div class="flex gap-3">
                             <div class="flex flex-col gap-1.5 flex-1">
-                                <Label htmlFor="hf-host">Host / IP</Label>
-                                <Input id="hf-host" v-model="newHost.host" placeholder="192.168.1.1" />
+                                <Label htmlFor="hf-host" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Host / IP</Label>
+                                <Input id="hf-host" v-model="newHost.host" placeholder="192.168.1.1" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                             </div>
                             <div class="flex flex-col gap-1.5 w-20">
-                                <Label htmlFor="hf-port">Port</Label>
-                                <Input id="hf-port" type="number" v-model="newHost.port" />
+                                <Label htmlFor="hf-port" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Port</Label>
+                                <Input id="hf-port" type="number" v-model="newHost.port" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                             </div>
                         </div>
 
                         <!-- Username + Password side by side -->
                         <div class="flex gap-3">
                             <div class="flex flex-col gap-1.5 flex-1">
-                                <Label htmlFor="hf-user">Username</Label>
-                                <Input id="hf-user" v-model="newHost.username" placeholder="root" />
+                                <Label htmlFor="hf-user" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Username</Label>
+                                <Input id="hf-user" v-model="newHost.username" placeholder="root" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                             </div>
                             <div class="flex flex-col gap-1.5 flex-1">
-                                <Label htmlFor="hf-pass">Password</Label>
+                                <Label htmlFor="hf-pass" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Password</Label>
                                 <Input id="hf-pass" type="password" v-model="newHost.password"
-                                    :placeholder="editingHostId ? 'Leave blank to keep' : 'Password'" />
+                                    :placeholder="editingHostId ? 'Leave blank to keep' : 'Password'" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                             </div>
                         </div>
                     </div>
 
-                    <DialogFooter>
-                        <Button variant="outline" @click="isAddModalOpen = false">Cancel</Button>
-                        <Button @click="saveHost">{{ editingHostId ? 'Update' : 'Save' }}</Button>
+                    <DialogFooter :class="settingsStore.appTheme === 'glass' ? 'border-none' : ''">
+                        <Button variant="outline" @click="isAddModalOpen = false" :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''">Cancel</Button>
+                        <Button @click="saveHost" :class="settingsStore.appTheme === 'glass' ? 'btn-primary' : ''">{{ editingHostId ? 'Update' : 'Save' }}</Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
@@ -315,33 +317,35 @@ async function connectToHost(hostId: string) {
             <Dialog v-model:open="isFolderModalOpen">
                 <button
                     @click="resetForms(); isFolderModalOpen = true"
-                    class="p-1.5 rounded-md border border-border hover:bg-muted transition-colors"
+                    class="p-1.5 rounded-md border transition-colors"
+                    :class="settingsStore.appTheme === 'glass' ? 'border-white/10 hover:bg-white/5 text-white/80 hover:text-white' : 'border-border hover:bg-muted'"
                     title="New Folder"
                 >
                     <FolderPlus class="w-4 h-4" />
                 </button>
-                <DialogContent class="sm:max-w-[360px]">
+                <DialogContent class="sm:max-w-[360px]" :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.8)]' : ''">
                     <DialogHeader>
-                        <DialogTitle>New Folder</DialogTitle>
-                        <DialogDescription>Organize your hosts into folders.</DialogDescription>
+                        <DialogTitle :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]' : ''">New Folder</DialogTitle>
+                        <DialogDescription :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/60' : ''">Organize your hosts into folders.</DialogDescription>
                     </DialogHeader>
                     <div class="flex flex-col gap-3 py-3">
                         <div class="flex flex-col gap-1.5">
-                            <Label htmlFor="ff-parent">Parent</Label>
+                            <Label htmlFor="ff-parent" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Parent</Label>
                             <select id="ff-parent" v-model="newFolder.parentId"
-                                class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
+                                class="flex h-9 w-full rounded-md border px-3 py-1 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                                :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white focus:!outline-none focus:!ring-2 focus:!ring-[#2D8CFF]/40' : 'border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring'">
                                 <option :value="null">Root (None)</option>
                                 <option v-for="f in formattedFolders" :key="f.id" :value="f.id">{{ f.displayName }}</option>
                             </select>
                         </div>
                         <div class="flex flex-col gap-1.5">
-                            <Label htmlFor="ff-name">Name</Label>
-                            <Input id="ff-name" v-model="newFolder.name" placeholder="My Project" @keyup.enter="saveFolder" />
+                            <Label htmlFor="ff-name" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Name</Label>
+                            <Input id="ff-name" v-model="newFolder.name" placeholder="My Project" @keyup.enter="saveFolder" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                         </div>
                     </div>
-                    <DialogFooter>
-                        <Button variant="outline" @click="isFolderModalOpen = false">Cancel</Button>
-                        <Button @click="saveFolder">Create</Button>
+                    <DialogFooter :class="settingsStore.appTheme === 'glass' ? 'border-none' : ''">
+                        <Button variant="outline" @click="isFolderModalOpen = false" :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''">Cancel</Button>
+                        <Button @click="saveFolder" :class="settingsStore.appTheme === 'glass' ? 'btn-primary' : ''">Create</Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
@@ -349,7 +353,8 @@ async function connectToHost(hostId: string) {
             <!-- Settings -->
             <button
                 @click="isSettingsOpen = true"
-                class="p-1.5 rounded-md border border-border hover:bg-muted transition-colors"
+                class="p-1.5 rounded-md border transition-colors"
+                :class="settingsStore.appTheme === 'glass' ? 'border-white/10 hover:bg-white/5 text-white/80 hover:text-white' : 'border-border hover:bg-muted'"
                 title="Settings"
             >
                 <Cog class="w-4 h-4" />
@@ -364,16 +369,16 @@ async function connectToHost(hostId: string) {
 
     <!-- ── Rename Folder Dialog (shared) ─────────────────────────────────── -->
     <Dialog v-model:open="isRenameModalOpen">
-        <DialogContent class="sm:max-w-[360px]">
+        <DialogContent class="sm:max-w-[360px]" :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.8)]' : ''">
             <DialogHeader>
-                <DialogTitle>Rename Folder</DialogTitle>
+                <DialogTitle :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]' : ''">Rename Folder</DialogTitle>
             </DialogHeader>
             <div class="py-3">
-                <Input v-model="renameData.name" @keyup.enter="saveRename" />
+                <Input v-model="renameData.name" @keyup.enter="saveRename" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
             </div>
-            <DialogFooter>
-                <Button variant="outline" @click="isRenameModalOpen = false">Cancel</Button>
-                <Button @click="saveRename">Rename</Button>
+            <DialogFooter :class="settingsStore.appTheme === 'glass' ? 'border-none' : ''">
+                <Button variant="outline" @click="isRenameModalOpen = false" :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''">Cancel</Button>
+                <Button @click="saveRename" :class="settingsStore.appTheme === 'glass' ? 'btn-primary' : ''">Rename</Button>
             </DialogFooter>
         </DialogContent>
     </Dialog>

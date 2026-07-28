@@ -1,3 +1,27 @@
+# Airlock v1.2.0 Release Notes
+
+This release brings extensive polish to the Glassmorphism theme and fixes native window controls.
+
+## ✨ New Features & Polish
+
+### VPN Integration
+- **OpenConnect Support**: Integrated robust VPN capabilities via OpenConnect. Add, edit, and manage VPN profiles natively inside Airlock.
+- **Auto-detection & MFA**: Supports protocol auto-detection and seamless multi-factor authentication handling when connecting to secure corporate gateways.
+- **Dedicated Panel**: A new VPN tab next to the host explorer lets you organize and quickly connect to VPN servers before launching your SSH sessions.
+
+### Glassmorphism Theme
+- **Consistent Modal Styling**: All application dialogs (Settings, Add/Edit Host, Add VPN Profile, New Folder) now flawlessly support the Glassmorphism theme with deep `#0A0D14` backgrounds, semi-transparent borders, floating inputs, and cyan/blue focus rings.
+- **Sidebar Enhancements**: Improved the connection list aesthetics in the glass theme. Text is now a crisp white, and hovering over sidebar items or footer buttons triggers a premium glass highlight instead of solid gray.
+- **Settings Enhancements**: The Settings modal is now fully resizable and scrollable.
+
+## 🛠 Bug Fixes
+
+### Window Controls
+- **Maximize & Minimize Fix**: Fixed an issue where the custom Minimize, Maximize, and Close buttons on the title bar were non-functional due to missing Tauri v2 security capabilities. All window controls now work flawlessly.
+- **Theme Overrides**: Fixed an issue where default solid white backgrounds were appearing on buttons and dropdown selects in the dark Glassmorphism theme.
+
+---
+
 # Airlock v1.1.2 Release Notes
 
 This patch release fixes a synchronization issue with the terminal dimensions.

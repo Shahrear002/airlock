@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { type Host, useHostsStore } from '~/stores/hosts'
+import { useSettingsStore } from '~/stores/settings'
 import { ChevronRight, ChevronDown, Folder, Monitor, Trash2, FolderOpen } from 'lucide-vue-next'
 import { ask } from '@tauri-apps/plugin-dialog'
 import {
@@ -18,6 +19,7 @@ const props = defineProps<{
 
 const emit = defineEmits(['connect', 'select-folder', 'edit', 'rename', 'create-host', 'create-folder'])
 const hostsStore = useHostsStore()
+const settingsStore = useSettingsStore()
 const isOpen = ref(false)
 
 const children = computed(() => hostsStore.getChildren(props.item.id))
@@ -54,21 +56,22 @@ const handleDelete = async () => {
     <ContextMenu>
         <ContextMenuTrigger as-child>
             <div 
-                class="flex items-center gap-1 p-1 rounded-md hover:bg-muted cursor-pointer group transition-colors select-none text-sm"
+                class="flex items-center gap-1 p-1 rounded-md cursor-pointer group transition-colors select-none text-sm"
+                :class="settingsStore.appTheme === 'glass' ? 'hover:bg-white/5 text-[#E9EDF1]' : 'hover:bg-muted'"
                 :style="{ paddingLeft: `${props.depth * 24 + 12}px` }"
                 @click="handleClick"
             >
                 <!-- Folder Icon / Chevron -->
-                <div v-if="props.item.type === 'folder'" class="flex items-center text-muted-foreground mr-1">
+                <div v-if="props.item.type === 'folder'" class="flex items-center mr-1" :class="settingsStore.appTheme === 'glass' ? 'text-white/60' : 'text-muted-foreground'">
                     <component :is="isOpen ? ChevronDown : ChevronRight" class="w-3 h-3" />
                     <component :is="isOpen ? FolderOpen : Folder" class="w-4 h-4 ml-1" />
                 </div>
                 
                 <!-- Host Icon -->
-                <Monitor v-else class="w-4 h-4 text-muted-foreground mr-2 group-hover:text-foreground" />
+                <Monitor v-else class="w-4 h-4 mr-2" :class="settingsStore.appTheme === 'glass' ? 'text-white/60 group-hover:text-white' : 'text-muted-foreground group-hover:text-foreground'" />
 
                 <!-- Name -->
-                <span class="flex-1 truncate font-medium text-foreground/80 group-hover:text-foreground">
+                <span class="flex-1 truncate font-medium" :class="settingsStore.appTheme === 'glass' ? 'text-white/90 group-hover:text-white' : 'text-foreground/80 group-hover:text-foreground'">
                     {{ props.item.name }}
                 </span>
             </div>

@@ -23,6 +23,8 @@ export default defineConfig({
                     { text: 'Managing Hosts', link: '/guide/host-management' },
                     { text: 'Terminal Features', link: '/guide/terminal' },
                     { text: 'SFTP File Transfer', link: '/guide/sftp' },
+                    { text: 'VPN Connections', link: '/guide/vpn' },
+                    { text: 'Customization & Themes', link: '/guide/customization' },
                     { text: 'Security & Encryption', link: '/guide/security' },
                     { text: 'Import & Export', link: '/guide/backup' }
                 ]

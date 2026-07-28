@@ -17,9 +17,11 @@ import DialogFooter from '@/components/ui/dialog/DialogFooter.vue'
 import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import Label from '@/components/ui/label/Label.vue'
+import { useSettingsStore } from '~/stores/settings'
 
 const vpnConfigsStore = useVpnConfigsStore()
 const vpnStore = useVpnStore()
+const settingsStore = useSettingsStore()
 
 // ── Dialog state ──────────────────────────────────────────────────────────────
 const isDialogOpen = ref(false)
@@ -477,13 +479,16 @@ function protocolLabel(hint: OpenConnectProtocolHint | undefined) {
 
     <!-- ── Add / Edit Dialog ──────────────────────────────────────────────── -->
     <Dialog v-model:open="isDialogOpen">
-        <DialogContent class="w-[95vw] max-w-[540px] max-h-[85vh] flex flex-col resize overflow-hidden min-w-[320px] min-h-[400px]">
+        <DialogContent 
+            class="w-[95vw] max-w-[540px] max-h-[85vh] flex flex-col resize overflow-hidden min-w-[320px] min-h-[400px]"
+            :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.8)]' : ''"
+        >
             <DialogHeader class="flex-shrink-0">
-                <DialogTitle class="flex items-center gap-2">
+                <DialogTitle class="flex items-center gap-2" :class="settingsStore.appTheme === 'glass' ? 'text-[15px] !text-[#E9EDF1]' : ''">
                     <Shield class="w-4 h-4 text-primary" />
-                    {{ isEditing ? 'Edit VPN Profile' : 'Add VPN Profile' }}
+                    {{ isEditing ? 'Edit VPN Profile' : '🛡 Add VPN Profile' }}
                 </DialogTitle>
-                <DialogDescription>
+                <DialogDescription :class="settingsStore.appTheme === 'glass' ? 'hint' : ''">
                     Passwords and keys are encrypted with AES-256 before being stored.
                 </DialogDescription>
             </DialogHeader>
@@ -492,44 +497,42 @@ function protocolLabel(hint: OpenConnectProtocolHint | undefined) {
 
                 <!-- Profile name -->
                 <div class="flex flex-col gap-1.5">
-                    <Label htmlFor="vpn-name">Profile Name</Label>
-                    <Input id="vpn-name" v-model="form.name" placeholder="e.g. Work VPN, Mullvad US, Home Lab" />
+                    <Label htmlFor="vpn-name" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Profile Name</Label>
+                    <Input id="vpn-name" v-model="form.name" placeholder="e.g. Work VPN, Mullvad US, Home Lab" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#1DE9B6]/40' : ''" />
                 </div>
 
                 <!-- Protocol selector (only when adding) -->
                 <div v-if="!isEditing" class="flex flex-col gap-1.5">
-                    <Label>Protocol</Label>
+                    <Label :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Protocol</Label>
                     <div class="grid grid-cols-2 gap-2">
                         <button
                             @click="form.protocol = 'wireguard'"
                             class="flex flex-col items-start gap-1 p-3 rounded-lg border transition-all text-left"
-                            :class="{
-                                'border-blue-500/60 bg-blue-500/10': form.protocol === 'wireguard',
-                                'border-border hover:border-border/80 hover:bg-muted/30': form.protocol !== 'wireguard',
-                            }"
+                            :class="[
+                                form.protocol === 'wireguard' ? (settingsStore.appTheme === 'glass' ? 'border-[#1DE9B6]/50 bg-[#1DE9B6]/10' : 'border-blue-500/60 bg-blue-500/10') : (settingsStore.appTheme === 'glass' ? 'border-white/10 hover:border-white/20 hover:bg-white/5' : 'border-border hover:border-border/80 hover:bg-muted/30')
+                            ]"
                         >
                             <div class="flex items-center gap-2">
-                                <KeyRound class="w-4 h-4" :class="form.protocol === 'wireguard' ? 'text-blue-400' : 'text-muted-foreground'" />
-                                <span class="text-sm font-semibold" :class="form.protocol === 'wireguard' ? 'text-blue-400' : ''">WireGuard</span>
-                                <span class="text-[10px] font-bold px-1 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30">WG</span>
+                                <KeyRound class="w-4 h-4" :class="form.protocol === 'wireguard' ? (settingsStore.appTheme === 'glass' ? 'text-[#1DE9B6]' : 'text-blue-400') : 'text-muted-foreground'" />
+                                <span class="text-sm font-semibold" :class="form.protocol === 'wireguard' ? (settingsStore.appTheme === 'glass' ? 'text-[#1DE9B6]' : 'text-blue-400') : (settingsStore.appTheme === 'glass' ? 'text-white/80' : '')">WireGuard</span>
+                                <span class="text-[10px] font-bold px-1 py-0.5 rounded border" :class="form.protocol === 'wireguard' ? (settingsStore.appTheme === 'glass' ? 'bg-[#1DE9B6]/20 text-[#1DE9B6] border-[#1DE9B6]/30' : 'bg-blue-500/20 text-blue-400 border-blue-500/30') : 'bg-transparent text-muted-foreground border-border/50'">WG</span>
                             </div>
-                            <p class="text-xs text-muted-foreground">Paste a .conf file — for personal VPNs, Mullvad, ProtonVPN</p>
+                            <p class="text-xs" :class="settingsStore.appTheme === 'glass' ? 'text-white/40' : 'text-muted-foreground'">Paste a .conf file — for personal VPNs, Mullvad, ProtonVPN</p>
                         </button>
 
                         <button
                             @click="form.protocol = 'openconnect'"
                             class="flex flex-col items-start gap-1 p-3 rounded-lg border transition-all text-left"
-                            :class="{
-                                'border-purple-500/60 bg-purple-500/10': form.protocol === 'openconnect',
-                                'border-border hover:border-border/80 hover:bg-muted/30': form.protocol !== 'openconnect',
-                            }"
+                            :class="[
+                                form.protocol === 'openconnect' ? (settingsStore.appTheme === 'glass' ? 'border-[#2D8CFF]/50 bg-[#2D8CFF]/10' : 'border-purple-500/60 bg-purple-500/10') : (settingsStore.appTheme === 'glass' ? 'border-white/10 hover:border-white/20 hover:bg-white/5' : 'border-border hover:border-border/80 hover:bg-muted/30')
+                            ]"
                         >
                             <div class="flex items-center gap-2">
-                                <Globe class="w-4 h-4" :class="form.protocol === 'openconnect' ? 'text-purple-400' : 'text-muted-foreground'" />
-                                <span class="text-sm font-semibold" :class="form.protocol === 'openconnect' ? 'text-purple-400' : ''">OpenConnect</span>
-                                <span class="text-[10px] font-bold px-1 py-0.5 rounded bg-purple-500/20 text-purple-400 border border-purple-500/30">OC</span>
+                                <Globe class="w-4 h-4" :class="form.protocol === 'openconnect' ? (settingsStore.appTheme === 'glass' ? 'text-[#2D8CFF]' : 'text-purple-400') : 'text-muted-foreground'" />
+                                <span class="text-sm font-semibold" :class="form.protocol === 'openconnect' ? (settingsStore.appTheme === 'glass' ? 'text-[#2D8CFF]' : 'text-purple-400') : (settingsStore.appTheme === 'glass' ? 'text-white/80' : '')">OpenConnect</span>
+                                <span class="text-[10px] font-bold px-1 py-0.5 rounded border" :class="form.protocol === 'openconnect' ? (settingsStore.appTheme === 'glass' ? 'bg-[#2D8CFF]/20 text-[#2D8CFF] border-[#2D8CFF]/30' : 'bg-purple-500/20 text-purple-400 border-purple-500/30') : 'bg-transparent text-muted-foreground border-border/50'">OC</span>
                             </div>
-                            <p class="text-xs text-muted-foreground">URL + credentials — for Cisco, GlobalProtect, Fortinet</p>
+                            <p class="text-xs" :class="settingsStore.appTheme === 'glass' ? 'text-white/40' : 'text-muted-foreground'">URL + credentials — for Cisco, GlobalProtect, Fortinet</p>
                         </button>
                     </div>
                 </div>
@@ -538,8 +541,8 @@ function protocolLabel(hint: OpenConnectProtocolHint | undefined) {
                 <template v-if="form.protocol === 'wireguard'">
                     <div class="flex flex-col gap-1.5">
                         <div class="flex items-center justify-between">
-                            <Label htmlFor="wg-config">WireGuard Configuration</Label>
-                            <span class="text-xs text-muted-foreground">Paste your .conf file</span>
+                            <Label htmlFor="wg-config" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">WireGuard Configuration</Label>
+                            <span class="text-xs" :class="settingsStore.appTheme === 'glass' ? 'text-white/40' : 'text-muted-foreground'">Paste your .conf file</span>
                         </div>
                         <textarea
                             id="wg-config"
@@ -555,7 +558,8 @@ PublicKey = <server-public-key>
 Endpoint = vpn.example.com:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25"
-                            class="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono resize-y focus:outline-none focus:ring-2 focus:ring-ring text-foreground placeholder:text-muted-foreground/50 leading-relaxed min-h-[140px] max-h-[260px]"
+                            class="w-full resize-y focus:outline-none placeholder:text-muted-foreground/50 leading-relaxed"
+                            :class="settingsStore.appTheme === 'glass' ? 'code-area' : 'rounded-md border border-input bg-background px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-ring text-foreground min-h-[140px] max-h-[260px]'"
                         />
                     </div>
                 </template>
@@ -565,44 +569,45 @@ PersistentKeepalive = 25"
                     <!-- Server URL + Port -->
                     <div class="flex gap-2">
                         <div class="flex flex-col gap-1.5 flex-1">
-                            <Label htmlFor="oc-server">Server URL</Label>
+                            <Label htmlFor="oc-server" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Server URL</Label>
                             <Input id="oc-server" v-model="form.server_url"
-                                placeholder="vpn.company.com" />
+                                placeholder="vpn.company.com" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                         </div>
                         <div class="flex flex-col gap-1.5 w-24">
-                            <Label htmlFor="oc-port">Port</Label>
+                            <Label htmlFor="oc-port" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Port</Label>
                             <Input id="oc-port" v-model.number="form.port" type="number"
-                                min="1" max="65535" placeholder="443" />
+                                min="1" max="65535" placeholder="443" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                         </div>
                     </div>
 
                     <!-- Protocol hint -->
                     <div class="flex flex-col gap-1.5">
-                        <Label htmlFor="oc-protocol">Server Protocol</Label>
+                        <Label htmlFor="oc-protocol" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Server Protocol</Label>
                         <select id="oc-protocol" v-model="form.protocol_hint"
-                            class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
+                            class="flex h-9 w-full rounded-md border px-3 py-1 text-sm disabled:cursor-not-allowed disabled:opacity-50" 
+                            :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white focus:!outline-none focus:!ring-2 focus:!ring-[#2D8CFF]/40 !ring-offset-0' : 'bg-background border-input focus:outline-none focus:ring-2 focus:ring-ring'">
                             <option v-for="p in openConnectProtocols" :key="p.value" :value="p.value">
                                 {{ p.label }} — {{ p.description }}
                             </option>
                         </select>
-                        <p class="text-xs text-muted-foreground">Choose Auto-detect if unsure — OpenConnect will probe the server.</p>
+                        <p class="text-xs" :class="settingsStore.appTheme === 'glass' ? 'text-white/40' : 'text-muted-foreground'">Choose Auto-detect if unsure — OpenConnect will probe the server.</p>
                     </div>
 
                     <!-- Username + Password -->
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col gap-1.5">
-                            <Label htmlFor="oc-user">Username</Label>
-                            <Input id="oc-user" v-model="form.username" placeholder="john.doe" />
+                            <Label htmlFor="oc-user" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Username</Label>
+                            <Input id="oc-user" v-model="form.username" placeholder="john.doe" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                         </div>
                         <div class="flex flex-col gap-1.5">
-                            <Label htmlFor="oc-pass">Password</Label>
+                            <Label htmlFor="oc-pass" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/70' : ''">Password</Label>
                             <Input id="oc-pass" type="password" v-model="form.password"
-                                :placeholder="isEditing ? 'Leave blank to keep' : 'Password'" />
+                                :placeholder="isEditing ? 'Leave blank to keep' : 'Password'" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
                         </div>
                     </div>
 
                     <!-- 2FA note -->
-                    <div class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-400 leading-relaxed flex items-start gap-2">
+                    <div class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-400 leading-relaxed flex items-start gap-2" :class="settingsStore.appTheme === 'glass' ? '!bg-[#1A1605] !border-amber-500/20' : ''">
                         <Lock class="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                         <span>If your VPN requires a 2FA / MFA token, a prompt will appear automatically when you connect. You do not need to configure it here.</span>
                     </div>
@@ -615,11 +620,16 @@ PersistentKeepalive = 25"
                 </div>
             </div>
 
-            <DialogFooter class="flex-shrink-0 pt-2 border-t border-border">
-                <Button variant="outline" @click="isDialogOpen = false">Cancel</Button>
-                <Button @click="saveProfile" :disabled="isSaving" class="gap-2">
-                    <Loader2 v-if="isSaving" class="w-3.5 h-3.5 animate-spin" />
-                    {{ isEditing ? 'Update Profile' : 'Save Profile' }}
+            <DialogFooter class="mt-4 border-t pt-4 flex-shrink-0" :class="settingsStore.appTheme === 'glass' ? 'border-white/10' : 'border-border'">
+                <Button variant="outline" @click="isDialogOpen = false" :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''">Cancel</Button>
+                <Button 
+                    variant="default"
+                    @click="saveProfile" 
+                    :disabled="!isFormValid || isSaving"
+                    :class="settingsStore.appTheme === 'glass' ? '!bg-gradient-to-br !from-[#1DE9B6] !to-[#2D8CFF] !text-[#062018] !border-none hover:!opacity-90' : ''"
+                >
+                    <Loader2 v-if="isSaving" class="w-4 h-4 mr-2 animate-spin" />
+                    {{ isEditing ? 'Save Changes' : 'Save profile' }}
                 </Button>
             </DialogFooter>
         </DialogContent>

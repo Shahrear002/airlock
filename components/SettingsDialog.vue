@@ -168,34 +168,51 @@ const reset = () => {
 
 <template>
   <Dialog :open="open" @update:open="$emit('update:open', $event)">
-    <DialogContent class="sm:max-w-[500px]">
+    <DialogContent 
+        class="sm:max-w-[500px] resize overflow-y-auto overflow-x-hidden min-h-[400px] max-h-[85vh] flex flex-col"
+        :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.8)]' : ''"
+    >
       <DialogHeader>
-        <DialogTitle>Settings & Data</DialogTitle>
-        <DialogDescription>
+        <DialogTitle :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]' : ''">Settings & Data</DialogTitle>
+        <DialogDescription :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/60' : ''">
           Manage your Airlock options and backups.
         </DialogDescription>
       </DialogHeader>
       
-      <div class="space-y-6 py-4">
+      <div class="space-y-6 py-4 flex-1">
         
         <!-- Appearance Section -->
-         <div class="space-y-4 border rounded-lg p-4 bg-muted/20">
+         <div class="space-y-4 border rounded-lg p-4 transition-colors" :class="settingsStore.appTheme === 'glass' ? 'bg-white/5 border-white/10' : 'bg-muted/20 border-border'">
             <div class="flex items-center gap-2 font-semibold">
                 <TerminalIcon class="w-4 h-4" /> Appearance
             </div>
+           <div class="grid grid-cols-4 items-center gap-4 mb-3">
+               <Label class="text-right" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/80' : ''">App Theme</Label>
+               <div class="col-span-3">
+                   <select 
+                      v-model="settingsStore.appTheme" 
+                      class="flex h-10 w-full items-center justify-between rounded-md border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                      :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white focus:!outline-none focus:!ring-2 focus:!ring-[#2D8CFF]/40 !ring-offset-0' : 'bg-background border-input text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-background placeholder:text-muted-foreground'"
+                    >
+                       <option value="default">Default</option>
+                       <option value="glass">Glassmorphism</option>
+                   </select>
+               </div>
+            </div>
             <div class="grid grid-cols-4 items-center gap-4">
-               <Label class="text-right">Theme</Label>
+               <Label class="text-right" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/80' : ''">Terminal</Label>
                <div class="col-span-3 flex gap-2">
                    <select 
                       v-model="settingsStore.terminalThemeName" 
-                      class="flex-1 flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      class="flex-1 flex h-10 w-full items-center justify-between rounded-md border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                      :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white focus:!outline-none focus:!ring-2 focus:!ring-[#2D8CFF]/40 !ring-offset-0' : 'bg-background border-input text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-background placeholder:text-muted-foreground'"
                       @change="settingsStore.setTerminalTheme(($event.target as HTMLSelectElement).value)"
                     >
                        <option v-for="(theme, name) in settingsStore.allThemes" :key="name" :value="name">
                            {{ name }}
                        </option>
                    </select>
-                   <Button variant="outline" size="icon" @click="handleImportTheme" title="Import Theme (JSON)">
+                   <Button variant="outline" size="icon" @click="handleImportTheme" title="Import Theme (JSON)" :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''">
                        <Plus class="w-4 h-4" />
                    </Button>
                </div>
@@ -204,16 +221,16 @@ const reset = () => {
 
         <!-- Export Section -->
 
-        <div class="space-y-4 border rounded-lg p-4 bg-muted/20">
+        <div class="space-y-4 border rounded-lg p-4 transition-colors" :class="settingsStore.appTheme === 'glass' ? 'bg-white/5 border-white/10' : 'bg-muted/20 border-border'">
             <div class="flex items-center gap-2 font-semibold">
                 <Upload class="w-4 h-4" /> Export Backup
             </div>
-            <p class="text-sm text-muted-foreground">
+            <p class="text-sm" :class="settingsStore.appTheme === 'glass' ? 'text-white/60' : 'text-muted-foreground'">
                 Create an encrypted backup of all your hosts and folders.
             </p>
             <div class="flex gap-2">
-                <Input type="password" v-model="exportPassword" placeholder="Set a backup password" />
-                <Button @click="handleExport" :disabled="!exportPassword || isExporting">
+                <Input type="password" v-model="exportPassword" placeholder="Set a backup password" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
+                <Button @click="handleExport" :disabled="!exportPassword || isExporting" :class="settingsStore.appTheme === 'glass' ? 'btn-primary' : ''">
                     <Loader2 v-if="isExporting" class="w-4 h-4 animate-spin mr-2" />
                     Download
                 </Button>
@@ -221,39 +238,39 @@ const reset = () => {
         </div>
 
         <!-- Import Section -->
-        <div class="space-y-4 border rounded-lg p-4 bg-muted/20">
+        <div class="space-y-4 border rounded-lg p-4 transition-colors" :class="settingsStore.appTheme === 'glass' ? 'bg-white/5 border-white/10' : 'bg-muted/20 border-border'">
              <div class="flex items-center gap-2 font-semibold">
                 <Download class="w-4 h-4" /> Import Backup
             </div>
-             <p class="text-sm text-muted-foreground">
+             <p class="text-sm" :class="settingsStore.appTheme === 'glass' ? 'text-white/60' : 'text-muted-foreground'">
                 Restore from an existing backup file. Warning: This will overwrite current data.
             </p>
 
             <div v-if="!selectedFileContent">
                 <input type="file" ref="fileInput" class="hidden" accept=".json" @change="onFileSelected" />
-                <Button variant="outline" class="w-full" @click="triggerImport">
+                <Button variant="outline" class="w-full" @click="triggerImport" :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''">
                     Select Backup File
                 </Button>
             </div>
 
             <div v-else class="space-y-3 animate-in fade-in">
-                 <div class="text-xs font-mono bg-muted p-2 rounded">
+                 <div class="text-xs font-mono p-2 rounded" :class="settingsStore.appTheme === 'glass' ? 'bg-white/10 text-white' : 'bg-muted'">
                     File loaded. Enter password to decrypt.
                  </div>
                  <div class="flex gap-2">
-                    <Input type="password" v-model="importPassword" placeholder="Enter backup password" />
-                    <Button @click="handleImport" variant="destructive" :disabled="!importPassword || isImporting">
+                    <Input type="password" v-model="importPassword" placeholder="Enter backup password" :class="settingsStore.appTheme === 'glass' ? '!bg-white/5 !border-white/10 !text-white placeholder:text-white/30 focus-visible:!ring-[#2D8CFF]/40' : ''" />
+                    <Button @click="handleImport" variant="destructive" :disabled="!importPassword || isImporting" :class="settingsStore.appTheme === 'glass' ? '!bg-red-500/20 hover:!bg-red-500/30 !text-red-400 !border-red-500/30' : ''">
                         <Loader2 v-if="isImporting" class="w-4 h-4 animate-spin mr-2" />
                         Restore
                     </Button>
                 </div>
-                 <Button variant="ghost" size="sm" class="w-full" @click="reset">Cancel</Button>
+                 <Button variant="outline" size="sm" class="w-full" @click="reset" :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''">Cancel</Button>
             </div>
 
-            <div v-if="importError" class="text-xs text-destructive font-medium bg-destructive/10 p-2 rounded">
+            <div v-if="importError" class="text-xs font-medium p-2 rounded" :class="settingsStore.appTheme === 'glass' ? 'bg-red-500/20 text-red-400' : 'text-destructive bg-destructive/10'">
                 {{ importError }}
             </div>
-            <div v-if="importSuccess" class="text-xs text-green-500 font-medium bg-green-500/10 p-2 rounded">
+            <div v-if="importSuccess" class="text-xs font-medium p-2 rounded" :class="settingsStore.appTheme === 'glass' ? 'bg-[#1DE9B6]/20 text-[#1DE9B6]' : 'text-green-500 bg-green-500/10'">
                  {{ importSuccess }}
             </div>
         </div>

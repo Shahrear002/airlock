@@ -53,18 +53,49 @@ watch(() => tabsStore.activeTabId, async () => {
 
 onMounted(async () => {
 // ... existing onMounted code ...
+  const glassTerminalTheme = {
+    foreground: 'rgba(233,237,241,0.8)',
+    background: 'transparent',
+    cursor: '#1DE9B6',
+    cursorAccent: '#062018',
+    selectionBackground: 'rgba(29, 233, 182, 0.3)',
+    black: '#000000',
+    red: '#FF5F57',
+    green: '#6EF0CC',
+    yellow: '#FEBC2E',
+    blue: '#2D8CFF',
+    magenta: '#6C63FF',
+    cyan: '#1DE9B6',
+    white: '#E9EDF1',
+    brightBlack: 'rgba(233,237,241,0.4)',
+    brightRed: '#FF5F57',
+    brightGreen: '#6EF0CC',
+    brightYellow: '#FEBC2E',
+    brightBlue: '#2D8CFF',
+    brightMagenta: '#6C63FF',
+    brightCyan: '#1DE9B6',
+    brightWhite: '#ffffff'
+  }
+
   term = new Terminal({
     cursorBlink: true,
-    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-    fontSize: 14,
-    theme: settingsStore.currentTheme,
-    allowProposedApi: true
+    fontFamily: settingsStore.appTheme === 'glass' ? "'JetBrains Mono', monospace" : 'Menlo, Monaco, "Courier New", monospace',
+    fontSize: settingsStore.appTheme === 'glass' ? 13 : 14,
+    lineHeight: settingsStore.appTheme === 'glass' ? 1.65 : 1,
+    theme: settingsStore.appTheme === 'glass' ? glassTerminalTheme : settingsStore.currentTheme,
+    allowProposedApi: true,
+    allowTransparency: true
   })
   
   // Update theme when it changes
   watch(() => settingsStore.currentTheme, (newTheme) => {
       if (term) {
-          term.options.theme = newTheme
+          term.options.theme = { ...newTheme, background: settingsStore.appTheme === 'glass' ? 'transparent' : newTheme.background }
+      }
+  })
+  watch(() => settingsStore.appTheme, () => {
+      if (term) {
+          term.options.theme = { ...settingsStore.currentTheme, background: settingsStore.appTheme === 'glass' ? 'transparent' : settingsStore.currentTheme.background }
       }
   })
   
@@ -279,12 +310,13 @@ const split = async (direction: 'horizontal' | 'vertical', paneType: 'terminal' 
 
 <template>
   <div 
-    class="h-full w-full relative group" 
+    class="h-full w-full relative group transition-all px-1 py-1" 
     @click="activatePane" 
     @contextmenu="onRightClick"
   >
       <!-- Terminal Container -->
-      <div ref="terminalContainer" class="h-full w-full bg-[#282a36] overflow-hidden" />
+      <div ref="terminalContainer" class="h-full w-full overflow-hidden" 
+           :style="{ backgroundColor: settingsStore.appTheme === 'glass' ? 'transparent' : settingsStore.currentTheme.background }" />
       
       <!-- Disconnected Overlay -->
       <div 

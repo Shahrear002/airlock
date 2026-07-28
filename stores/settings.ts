@@ -168,6 +168,7 @@ export const builtinThemes: Record<string, TerminalTheme> = {
 }
 
 export const useSettingsStore = defineStore('settings', () => {
+    const appTheme = ref<'default' | 'glass'>('default')
     const terminalThemeName = ref<string>('Dracula')
     const userThemes = ref<Record<string, TerminalTheme>>({})
 
@@ -222,6 +223,7 @@ export const useSettingsStore = defineStore('settings', () => {
     loadUserThemes()
 
     return {
+        appTheme,
         terminalThemeName,
         currentTheme,
         userThemes,
