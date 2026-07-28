@@ -43,7 +43,9 @@ const handleConnect = async (connectionDetails: any) => {
             host: connectionDetails.host,
             port: Number(connectionDetails.port),
             user: connectionDetails.username,
-            password: connectionDetails.password || undefined 
+            password: connectionDetails.password || undefined,
+            cols: 80,
+            rows: 24
         })
     } catch (e) {
         console.error("Connect failed", e)

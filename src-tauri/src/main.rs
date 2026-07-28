@@ -16,11 +16,13 @@ async fn connect_ssh(
     port: u16,
     user: String,
     password: Option<String>,
+    cols: u32,
+    rows: u32,
 ) -> Result<(), String> {
     // Spawn off the connection task so we don't block the command
     let app_clone = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = connect_and_stream(id.clone(), host, port, user, password, app_clone).await {
+        if let Err(e) = connect_and_stream(id.clone(), host, port, user, password, cols, rows, app_clone).await {
             let _ = app.emit(&format!("ssh-error-{}", id), e.to_string());
         }
     });
