@@ -6,7 +6,7 @@ hero:
   text: "Secure, Local-First SSH Client"
   tagline: A modern terminal experience for Windows, macOS, and Linux.
   image:
-    src: /Screenshot-1.png
+    src: /Screenshot-2.png
     alt: Airlock Secure Terminal
   actions:
     - theme: brand

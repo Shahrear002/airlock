@@ -26,7 +26,7 @@ export const TauriStoreAdapter = {
                 (key === 'hosts' && value === '{"hosts":[]}' && oldValue && oldValue.length > 20) ||
                 (key === 'vpn_configs' && value === '{"profiles":[]}' && oldValue && oldValue.length > 20)
             ) {
-                console.warn(`[StoreAdapter] PREVENTING OVEWRITE: Attempted to save empty state for ${key} over existing data (len ${oldValue.length}). Skipping.`);
+                console.warn(`[StoreAdapter] PREVENTING OVERWRITE: Attempted to save empty/default state for ${key} over existing data (len ${oldValue.length}). Skipping.`);
                 return;
             }
 

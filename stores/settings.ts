@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { BaseDirectory, readTextFile, writeTextFile, exists, mkdir } from '@tauri-apps/plugin-fs'
+import { LazyStore } from '@tauri-apps/plugin-store'
 
 export interface TerminalTheme {
     background: string
@@ -171,6 +172,49 @@ export const useSettingsStore = defineStore('settings', () => {
     const appTheme = ref<'default' | 'glass'>('default')
     const terminalThemeName = ref<string>('Dracula')
     const userThemes = ref<Record<string, TerminalTheme>>({})
+    const _hydrated = ref(false)
+
+    // ── Manual persistence via Tauri Store ────────────────────────────────────
+    // We avoid pinia-plugin-persistedstate because its async hydration races
+    // with Pinia's initial state, causing saved preferences to be overwritten.
+
+    const _store = new LazyStore('store.bin')
+
+    async function _loadSettings() {
+        try {
+            const raw = await _store.get<string>('settings-prefs')
+            if (raw) {
+                const data = JSON.parse(raw)
+                if (data.appTheme) appTheme.value = data.appTheme
+                if (data.terminalThemeName) terminalThemeName.value = data.terminalThemeName
+            }
+        } catch (e) {
+            console.error('[SettingsStore] Failed to load settings:', e)
+        } finally {
+            _hydrated.value = true
+        }
+    }
+
+    async function _saveSettings() {
+        if (!_hydrated.value) return // Don't save until we've loaded
+        try {
+            const data = JSON.stringify({
+                appTheme: appTheme.value,
+                terminalThemeName: terminalThemeName.value,
+            })
+            await _store.set('settings-prefs', data)
+            await _store.save()
+        } catch (e) {
+            console.error('[SettingsStore] Failed to save settings:', e)
+        }
+    }
+
+    // Watch for changes and persist
+    watch([appTheme, terminalThemeName], () => {
+        _saveSettings()
+    })
+
+    // ── Computed ──────────────────────────────────────────────────────────────
 
     const allThemes = computed(() => {
         return { ...builtinThemes, ...userThemes.value }
@@ -205,8 +249,6 @@ export const useSettingsStore = defineStore('settings', () => {
             // Ensure config dir exists
             const configExists = await exists('', { baseDir: BaseDirectory.AppConfig })
             if (!configExists) {
-                // mkdir recursive not available on root? usually AppConfig dir exists or we create it
-                // Just try creating it if it fails
                 await mkdir('', { baseDir: BaseDirectory.AppConfig, recursive: true })
             }
 
@@ -220,6 +262,7 @@ export const useSettingsStore = defineStore('settings', () => {
     }
 
     // Initialize
+    _loadSettings()
     loadUserThemes()
 
     return {
@@ -232,6 +275,5 @@ export const useSettingsStore = defineStore('settings', () => {
         loadUserThemes,
         importTheme
     }
-}, {
-    persist: true
 })
+
