@@ -114,6 +114,7 @@ fn main() {
                 tauri::async_runtime::block_on(async move {
                     let mut t: tokio::sync::MutexGuard<'_, Option<ActiveTunnel>> = tunnel.lock().await;
                     match t.take() {
+                        #[cfg(target_os = "windows")]
                         Some(ActiveTunnel::WireGuard(handle)) => {
                             handle.outbound_task.abort();
                             handle.inbound_task.abort();
@@ -121,6 +122,8 @@ fn main() {
                             drop(handle._adapter);
                             log::info!("WireGuard tunnel torn down on app close");
                         }
+                        #[cfg(not(target_os = "windows"))]
+                        Some(ActiveTunnel::WireGuard(_)) => {}
                         Some(ActiveTunnel::OpenConnect(handle)) => {
                             handle.status_task.abort();
                             let mut child = handle.child.lock().await;

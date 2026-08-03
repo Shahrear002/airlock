@@ -1,6 +1,9 @@
+#[cfg(target_os = "windows")]
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
