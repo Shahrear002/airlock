@@ -3,10 +3,15 @@ use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
 use base64::Engine as _;
+#[cfg(target_os = "windows")]
 use base64::engine::general_purpose::STANDARD as BASE64;
+#[cfg(target_os = "windows")]
 use boringtun::noise::{Tunn, TunnResult};
+#[cfg(target_os = "windows")]
 use boringtun::x25519::{StaticSecret, PublicKey};
+#[cfg(target_os = "windows")]
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -16,6 +21,7 @@ use tokio::task::JoinHandle;
 
 // ─── WireGuard Config Parser ──────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 #[derive(Clone)]
 pub struct WgConfig {
     pub private_key: StaticSecret,
@@ -28,6 +34,7 @@ pub struct WgConfig {
     pub persistent_keepalive: Option<u16>,
 }
 
+#[cfg(target_os = "windows")]
 pub fn parse_wg_config(raw: &str) -> Result<WgConfig, String> {
     let mut section = "";
     let mut map: HashMap<&str, &str> = HashMap::new();
@@ -113,6 +120,7 @@ pub fn parse_wg_config(raw: &str) -> Result<WgConfig, String> {
 
 // ─── WireGuard Handle ─────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 pub struct VpnHandle {
     pub outbound_task: JoinHandle<()>,
     pub inbound_task: JoinHandle<()>,
@@ -122,6 +130,9 @@ pub struct VpnHandle {
     pub allowed_ips: Vec<IpNetwork>,
     pub _adapter: Arc<wintun::Adapter>,
 }
+
+#[cfg(not(target_os = "windows"))]
+pub struct VpnHandle {}
 
 // ─── OpenConnect Handle ───────────────────────────────────────────────────────
 
@@ -177,6 +188,7 @@ pub async fn get_vpn_status(state: tauri::State<'_, VpnState>) -> Result<VpnStat
 // ── WireGuard ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
+#[cfg(target_os = "windows")]
 pub async fn start_vpn_tunnel(
     app: tauri::AppHandle,
     state: tauri::State<'_, VpnState>,
@@ -377,6 +389,16 @@ pub async fn start_vpn_tunnel(
     });
     log::info!("WireGuard tunnel started successfully");
     Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "windows"))]
+pub async fn start_vpn_tunnel(
+    _app: tauri::AppHandle,
+    _state: tauri::State<'_, VpnState>,
+    _config: String,
+) -> Result<(), String> {
+    Err("WireGuard VPN is currently only supported on Windows in Airlock.".into())
 }
 
 // ── OpenConnect ───────────────────────────────────────────────────────────────
@@ -685,6 +707,7 @@ pub async fn stop_vpn_tunnel(
     match tunnel_guard.take() {
         None => return Err("No active VPN tunnel".into()),
 
+        #[cfg(target_os = "windows")]
         Some(ActiveTunnel::WireGuard(handle)) => {
             handle.outbound_task.abort();
             handle.inbound_task.abort();
@@ -700,6 +723,9 @@ pub async fn stop_vpn_tunnel(
             drop(handle._adapter);
             log::info!("WireGuard tunnel stopped");
         }
+
+        #[cfg(not(target_os = "windows"))]
+        Some(ActiveTunnel::WireGuard(_handle)) => {}
 
         Some(ActiveTunnel::OpenConnect(handle)) => {
             // Abort the stdout monitor task
@@ -721,6 +747,7 @@ pub async fn stop_vpn_tunnel(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 fn run_netsh(cmd: &str) -> Result<(), String> {
     let output = std::process::Command::new("cmd")
         .args(["/C", cmd])
@@ -735,6 +762,7 @@ fn run_netsh(cmd: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
 fn ipnetwork_to_mask(net: &IpNetwork) -> String {
     match net {
         IpNetwork::V4(n) => n.mask().to_string(),

@@ -33,7 +33,9 @@ tauri-plugin-fs = "2"
 tauri-plugin-store = "2.4.2"
 russh-sftp = "2.1.1"
 # WireGuard VPN (userspace)
-boringtun = { version = "0.7", default-features = false }
-wintun = "0.4"
 base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+wintun = "0.4"
+boringtun = { version = "0.7", default-features = false }
 ipnetwork = "0.20"
