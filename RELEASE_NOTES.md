@@ -1,3 +1,15 @@
+# Airlock v1.2.1 Release Notes
+
+This patch release fixes a terminal paste formatting issue affecting multiline commands.
+
+## 🐛 Bug Fixes
+
+### Terminal
+- **Multiline Paste Fix**: Fixed an issue where pasting multiline commands (e.g., Docker commands with backslash `\` continuations) into the terminal caused visual corruption, duplicated lines, and broken formatting. The terminal now wraps multiline pastes in Bracketed Paste Mode escape sequences, so the remote shell receives the entire block as a single event instead of executing each line individually.
+- **EOL Conversion**: Enabled `convertEol` in the xterm.js configuration so that `\n` is automatically converted to `\r\n` for correct line rendering.
+
+---
+
 # Airlock v1.2.0 Release Notes
 
 This release brings extensive polish to the Glassmorphism theme and fixes native window controls.

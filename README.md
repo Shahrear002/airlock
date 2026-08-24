@@ -11,7 +11,7 @@
 
 **Airlock** is a secure, local-first, and cross-platform SSH client built for developers who value privacy, portability, and modern design. Built with the power of **Rust** and **Tauri**, it delivers a native-performance terminal experience wrapped in a beautiful **Vue 3** interface.
 
-![Airlock Banner](Screenshot-1.png)
+![Airlock Banner](airlock_new.png)
 
 📖 **[View Documentation](https://shahrear002.github.io/airlock/)** | 📥 **[Download Latest Release](https://github.com/Shahrear002/airlock/releases/latest)**
 
