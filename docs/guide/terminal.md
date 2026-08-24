@@ -25,7 +25,7 @@ Airlock allows you to view multiple sessions side-by-side using split panes.
 
 Right-clicking on the terminal brings up a context menu with the following options:
 
--   **Copy**: Copies the selected text to your clipboard.
--   **Paste**: Pastes text from your clipboard into the terminal.
--   **Split Horizontal/Vertical**: Creates a new split pane.
+- **Copy**: Copies the selected text to your clipboard.
+- **Paste**: Pastes text from your clipboard into the terminal. Airlock fully supports bracketed paste mode, meaning multiline commands (like Docker scripts or long bash commands) paste cleanly without visual corruption or premature execution.
+- **Split Horizontal/Vertical**: Creates a new split pane.
 -   **Close Pane**: Closes the specific terminal pane you clicked on.

@@ -41,6 +41,17 @@ You can monitor active transfers in real-time:
 -   **Progress Bar**: Shows the current status of each file transfer.
 -   **Cancellation**: If you need to stop a transfer, you can click the **Cancel** button associated with the active task. This will safely halt the process.
 
+## Editing Files Locally (New in v1.2.2)
+
+Airlock allows you to seamlessly edit remote files using your favorite local editor (VS Code, Notepad, etc.):
+1. **Right-click** any file in the **Remote Pane**.
+2. Select **Edit Locally**.
+3. Airlock will securely download a temporary copy and open it in your OS's default editor.
+4. **Save** the file in your editor, and Airlock will automatically detect the change and upload it back to the server in the background.
+
+> [!TIP]
+> The temporary files are securely isolated and automatically managed by Airlock, so you don't have to worry about cleaning them up.
+
 ## Navigation Controls
 
 -   **Double-click**: Open a folder to view its contents.
