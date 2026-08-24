@@ -1,3 +1,19 @@
+# Airlock v1.2.2 Release Notes
+
+This release introduces the highly requested **Edit Locally** feature for SFTP and resolves some background noise issues.
+
+## ✨ New Features
+
+### SFTP File Transfer
+- **Edit Locally**: You can now right-click any file in the remote SFTP pane and select "Edit Locally." Airlock will download the file, open it in your system's default text editor (like Notepad, VS Code, or Sublime Text), and watch for changes. Whenever you save the file, Airlock automatically re-uploads the new version to the server in the background.
+
+## 🐛 Bug Fixes
+
+- **File Watcher Optimization**: Fixed an issue where the file watcher for local edits was monitoring the entire system temporary directory (`%TEMP%`), leading to excessive background processing. Edits are now securely isolated in a dedicated `airlock_edits` directory.
+- **Toast Notifications**: Added an auto-dismiss timer to the "Watching file..." toast notification so it no longer stays on screen indefinitely if you close your editor without saving.
+
+---
+
 # Airlock v1.2.1 Release Notes
 
 This patch release fixes a terminal paste formatting issue affecting multiline commands.

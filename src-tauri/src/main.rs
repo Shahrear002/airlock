@@ -7,7 +7,7 @@ mod vpn;
 
 use tauri::Emitter;
 use ssh_session::{AppState, connect_and_stream, SshInput};
-use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer};
+use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer, edit_remote_file};
 use vpn::{VpnState, ActiveTunnel, start_vpn_tunnel, stop_vpn_tunnel, get_vpn_status, start_openconnect_tunnel, send_mfa_token};
 
 #[tauri::command]
@@ -98,6 +98,7 @@ fn main() {
             sftp_upload,
             sftp_download,
             cancel_transfer,
+            edit_remote_file,
             // VPN — WireGuard
             start_vpn_tunnel,
             stop_vpn_tunnel,

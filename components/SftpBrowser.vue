@@ -2,8 +2,15 @@
 import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { FileCode, Folder, RefreshCw, X, Server, HardDrive, Loader2 } from 'lucide-vue-next'
+import { FileCode, Folder, RefreshCw, X, Server, HardDrive, Loader2, FileEdit, Check, AlertCircle, Eye } from 'lucide-vue-next'
 import { useTabsStore } from '~/stores/tabs'
+import {
+    ContextMenu,
+    ContextMenuTrigger,
+    ContextMenuContent,
+    ContextMenuItem,
+    ContextMenuSeparator
+} from '~/components/ui/context-menu'
 
 const props = defineProps<{
     sessionId: string,
@@ -43,6 +50,25 @@ const transferPercentage = computed(() => {
 const activeTransferId = ref('')
 
 let unlistenProgress: (() => void) | null = null;
+let unlistenEditOpened: (() => void) | null = null;
+let unlistenEditSaved: (() => void) | null = null;
+let unlistenEditError: (() => void) | null = null;
+
+// Edit toast state
+const editToast = ref<{ show: boolean, message: string, type: 'info' | 'success' | 'error', fileName: string }>(
+    { show: false, message: '', type: 'info', fileName: '' }
+)
+let editToastTimer: ReturnType<typeof setTimeout> | null = null
+
+const showEditToast = (message: string, type: 'info' | 'success' | 'error', fileName: string, autoDismiss = 0) => {
+    if (editToastTimer) clearTimeout(editToastTimer)
+    editToast.value = { show: true, message, type, fileName }
+    if (autoDismiss > 0) {
+        editToastTimer = setTimeout(() => {
+            editToast.value.show = false
+        }, autoDismiss)
+    }
+}
 
 // Fake Drag & Drop State
 const draggedItem = ref<{ type: 'local'|'remote', name: string, is_dir: boolean } | null>(null)
@@ -110,12 +136,30 @@ onMounted(async () => {
     setTimeout(() => {
         loadRemoteDir(remotePath.value)
     }, 1000)
+
+    // Listen for edit file events
+    unlistenEditOpened = await listen('edit-file-opened', (event: any) => {
+        const { file_name } = event.payload
+        showEditToast(`Watching ${file_name} for changes...`, 'info', file_name, 5000)
+    })
+
+    unlistenEditSaved = await listen('edit-file-saved', (event: any) => {
+        const { file_name } = event.payload
+        showEditToast(`${file_name} saved to server`, 'success', file_name, 4000)
+    })
+
+    unlistenEditError = await listen('edit-file-error', (event: any) => {
+        const { file_name, error } = event.payload
+        showEditToast(`Failed to save ${file_name}: ${error}`, 'error', file_name, 6000)
+    })
 })
 
 onUnmounted(() => {
-    if (unlistenProgress) {
-        unlistenProgress();
-    }
+    if (unlistenProgress) unlistenProgress();
+    if (unlistenEditOpened) unlistenEditOpened();
+    if (unlistenEditSaved) unlistenEditSaved();
+    if (unlistenEditError) unlistenEditError();
+    if (editToastTimer) clearTimeout(editToastTimer);
 })
 
 const navigateRemote = (name: string) => {
@@ -287,6 +331,20 @@ const cancelTransfer = async () => {
         activeTransferId.value = ''
     }
 }
+
+const editLocally = async (fileName: string) => {
+    const backendId = props.connectionId || props.sessionId
+    const fullPath = joinPath(remotePath.value, fileName)
+    showEditToast(`Opening ${fileName}...`, 'info', fileName)
+    try {
+        await invoke('edit_remote_file', {
+            id: backendId,
+            remotePath: fullPath
+        })
+    } catch (e: any) {
+        showEditToast(`${e}`, 'error', fileName, 6000)
+    }
+}
 </script>
 
 <template>
@@ -439,25 +497,85 @@ const cancelTransfer = async () => {
                               </td>
                               <td class="p-2.5 px-4 text-gray-500 text-right">-</td>
                           </tr>
-                          <tr v-for="file in remoteFiles" :key="file.name" 
-                              @dblclick.stop="file.is_dir ? navigateRemote(file.name) : null" 
-                              @mousedown="onMouseDown($event, 'remote', file.name, file.is_dir)"
-                              class="hover:bg-white/[0.03] cursor-pointer border-b border-white/[0.02] group/row active:bg-blue-500/10 transition-colors duration-150"
-                              :class="{'bg-blue-500/20': draggedItem?.name === file.name && draggedItem?.type === 'remote'}">
-                              <td class="p-2.5 px-4 flex items-center gap-3 truncate">
-                                  <Folder v-if="file.is_dir" class="w-4 h-4 text-emerald-400 group-hover/row:text-emerald-300 shrink-0 transition-colors" />
-                                  <FileCode v-else class="w-4 h-4 text-gray-500 group-hover/row:text-gray-400 shrink-0 transition-colors" />
-                                  <span class="truncate font-medium" :class="{'text-gray-300 group-hover/row:text-gray-200': !file.is_dir, 'text-emerald-200 group-hover/row:text-emerald-100': file.is_dir}">{{ file.name }}</span>
-                              </td>
-                              <td class="p-2.5 px-4 text-gray-500 whitespace-nowrap text-xs text-right tracking-wider">
-                                  {{ file.is_dir ? '-' : formatSize(file.size) }}
-                              </td>
-                          </tr>
+                          <ContextMenu v-for="file in remoteFiles" :key="file.name">
+                              <ContextMenuTrigger as-child>
+                                  <tr 
+                                      @dblclick.stop="file.is_dir ? navigateRemote(file.name) : null" 
+                                      @mousedown="onMouseDown($event, 'remote', file.name, file.is_dir)"
+                                      class="hover:bg-white/[0.03] cursor-pointer border-b border-white/[0.02] group/row active:bg-blue-500/10 transition-colors duration-150"
+                                      :class="{'bg-blue-500/20': draggedItem?.name === file.name && draggedItem?.type === 'remote'}">
+                                      <td class="p-2.5 px-4 flex items-center gap-3 truncate">
+                                          <Folder v-if="file.is_dir" class="w-4 h-4 text-emerald-400 group-hover/row:text-emerald-300 shrink-0 transition-colors" />
+                                          <FileCode v-else class="w-4 h-4 text-gray-500 group-hover/row:text-gray-400 shrink-0 transition-colors" />
+                                          <span class="truncate font-medium" :class="{'text-gray-300 group-hover/row:text-gray-200': !file.is_dir, 'text-emerald-200 group-hover/row:text-emerald-100': file.is_dir}">{{ file.name }}</span>
+                                      </td>
+                                      <td class="p-2.5 px-4 text-gray-500 whitespace-nowrap text-xs text-right tracking-wider">
+                                          {{ file.is_dir ? '-' : formatSize(file.size) }}
+                                      </td>
+                                  </tr>
+                              </ContextMenuTrigger>
+                              <ContextMenuContent class="bg-[#1e1e2e]/95 backdrop-blur-xl border-white/10">
+                                  <ContextMenuItem
+                                      v-if="!file.is_dir"
+                                      @click="editLocally(file.name)"
+                                      class="flex items-center gap-2 text-gray-200 hover:text-white focus:bg-white/10 focus:text-white cursor-pointer"
+                                  >
+                                      <FileEdit class="w-4 h-4 text-blue-400" />
+                                      Edit Locally
+                                  </ContextMenuItem>
+                                  <ContextMenuItem
+                                      v-if="file.is_dir"
+                                      @click="navigateRemote(file.name)"
+                                      class="flex items-center gap-2 text-gray-200 hover:text-white focus:bg-white/10 focus:text-white cursor-pointer"
+                                  >
+                                      <Folder class="w-4 h-4 text-emerald-400" />
+                                      Open Folder
+                                  </ContextMenuItem>
+                              </ContextMenuContent>
+                          </ContextMenu>
                       </tbody>
                   </table>
               </div>
           </div>
 
       </div>
+
+      <!-- Edit File Toast -->
+      <Transition
+          enter-active-class="transition-all duration-300 ease-out"
+          leave-active-class="transition-all duration-200 ease-in"
+          enter-from-class="translate-y-4 opacity-0 scale-95"
+          enter-to-class="translate-y-0 opacity-100 scale-100"
+          leave-from-class="translate-y-0 opacity-100 scale-100"
+          leave-to-class="translate-y-4 opacity-0 scale-95"
+      >
+          <div v-if="editToast.show && !transferLoading" 
+               class="absolute bottom-6 right-6 z-50 bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.5)] pl-5 pr-3 py-3 rounded-2xl flex items-center gap-4 text-sm min-w-[280px]">
+              <div class="h-10 w-10 rounded-full flex items-center justify-center shrink-0 border"
+                   :class="{
+                       'bg-blue-500/10 border-blue-500/20': editToast.type === 'info',
+                       'bg-emerald-500/10 border-emerald-500/20': editToast.type === 'success',
+                       'bg-red-500/10 border-red-500/20': editToast.type === 'error',
+                   }">
+                  <Eye v-if="editToast.type === 'info'" class="w-5 h-5 text-blue-400 animate-pulse" />
+                  <Check v-else-if="editToast.type === 'success'" class="w-5 h-5 text-emerald-400" />
+                  <AlertCircle v-else class="w-5 h-5 text-red-400" />
+              </div>
+              <div class="flex flex-col flex-1 min-w-0">
+                  <span class="text-gray-200 font-medium tracking-tight text-xs"
+                        :class="{
+                            'text-blue-300': editToast.type === 'info',
+                            'text-emerald-300': editToast.type === 'success',
+                            'text-red-300': editToast.type === 'error',
+                        }">
+                      {{ editToast.type === 'info' ? 'Watching' : editToast.type === 'success' ? 'Saved ✓' : 'Error' }}
+                  </span>
+                  <span class="text-gray-400 text-xs truncate">{{ editToast.message }}</span>
+              </div>
+              <button @click="editToast.show = false" class="p-1.5 hover:bg-white/10 rounded-full text-gray-500 hover:text-gray-300 transition-colors shrink-0" title="Dismiss">
+                  <X class="w-3.5 h-3.5" />
+              </button>
+          </div>
+      </Transition>
   </div>
 </template>

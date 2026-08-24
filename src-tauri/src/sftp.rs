@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
 #[derive(Clone, Serialize)]
@@ -346,5 +347,282 @@ pub async fn cancel_transfer(
     if let Some(token) = transfers.get(&transfer_id) {
         token.store(true, Ordering::Relaxed);
     }
+    Ok(())
+}
+
+/// Max file size allowed for "Edit Locally" (20 MB).
+const MAX_EDIT_FILE_SIZE: u64 = 20 * 1024 * 1024;
+
+/// Re-upload a local temp file back to the remote server via a fresh SFTP channel.
+async fn upload_from_temp(
+    handle: &Arc<Mutex<russh::client::Handle<crate::ssh_session::Client>>>,
+    local_path: &std::path::Path,
+    remote_path: &str,
+) -> Result<(), String> {
+    let contents = tokio::fs::read(local_path)
+        .await
+        .map_err(|e| format!("Failed to read temp file: {}", e))?;
+
+    let channel = {
+        let h = handle.lock().await;
+        h.channel_open_session()
+            .await
+            .map_err(|e| format!("Failed to open channel: {}", e))?
+    };
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("Failed to start SFTP subsystem: {}", e))?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("Failed to create SFTP session: {}", e))?;
+
+    let mut remote_file = sftp
+        .create(remote_path)
+        .await
+        .map_err(|e| format!("Failed to create remote file: {}", e))?;
+    remote_file
+        .write_all(&contents)
+        .await
+        .map_err(|e| format!("Failed to write remote file: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn edit_remote_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    remote_path: String,
+) -> Result<(), String> {
+    // 1. Get the SSH handle
+    let handle = {
+        let connections = state.connections.lock().await;
+        let conn = connections.get(&id).ok_or("Session not found")?;
+        conn.handle.clone()
+    };
+
+    // 2. Open SFTP channel and check file size
+    let channel = {
+        let h = handle.lock().await;
+        h.channel_open_session()
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| e.to_string())?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Size guard
+    let metadata = sftp
+        .metadata(&remote_path)
+        .await
+        .map_err(|e| format!("Failed to get file metadata: {:?}", e))?;
+    let file_size = metadata.size.unwrap_or(0);
+    if file_size > MAX_EDIT_FILE_SIZE {
+        return Err(format!(
+            "File too large ({:.1} MB). Maximum allowed size is 20 MB.",
+            file_size as f64 / (1024.0 * 1024.0)
+        ));
+    }
+
+    // 3. Download the file contents
+    let mut remote_file = sftp
+        .open(&remote_path)
+        .await
+        .map_err(|e| format!("Failed to open remote file: {:?}", e))?;
+    let mut contents = Vec::new();
+    loop {
+        let mut buf = vec![0u8; 65536];
+        let n = remote_file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed to read remote file: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        contents.extend_from_slice(&buf[..n]);
+    }
+
+    // 4. Write to a temp file (preserving the original extension)
+    let remote_p = std::path::Path::new(&remote_path);
+    let file_name = remote_p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let extension = remote_p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    // Build prefix from filename (without extension) for temp file identification
+    let stem = remote_p
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let prefix = format!("airlock_{}_", stem);
+
+    let airlock_temp_dir = std::env::temp_dir().join("airlock_edits");
+    let _ = std::fs::create_dir_all(&airlock_temp_dir);
+
+    let temp_file = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(&extension)
+        .tempfile_in(&airlock_temp_dir)
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+
+    // Write contents and persist (keep() prevents auto-deletion)
+    let (mut file, temp_path) = temp_file.keep().map_err(|e| format!("Failed to persist temp file: {}", e))?;
+    use std::io::Write;
+    file.write_all(&contents)
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+    file.flush()
+        .map_err(|e| format!("Failed to flush temp file: {}", e))?;
+    drop(file); // Close the file handle before opening in editor
+
+    // 5. Open in system default editor
+    open::that(&temp_path).map_err(|e| format!("Failed to open editor: {}", e))?;
+
+    // 6. Emit "opened" event
+    let _ = app.emit("edit-file-opened", serde_json::json!({
+        "remote_path": remote_path,
+        "file_name": file_name,
+    }));
+
+    // 7. Spawn the file watcher in a background task
+    let handle_clone = handle.clone();
+    let remote_path_clone = remote_path.clone();
+    let file_name_clone = file_name.clone();
+    let temp_path_clone = temp_path.clone();
+    let app_clone = app.clone();
+
+    tokio::task::spawn_blocking(move || {
+        use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let (tx, rx) = mpsc::channel::<Event>();
+
+        let mut watcher = match RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    let _ = tx.send(event);
+                }
+            },
+            Config::default(),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                log::error!("Failed to create file watcher: {}", e);
+                return;
+            }
+        };
+
+        // Watch the parent directory to catch atomic saves (rename/replace patterns)
+        let parent_dir = temp_path_clone
+            .parent()
+            .unwrap_or(&temp_path_clone);
+        if let Err(e) = watcher.watch(parent_dir, RecursiveMode::NonRecursive) {
+            log::error!("Failed to start watching: {}", e);
+            return;
+        }
+
+        log::info!(
+            "Watching temp file for changes: {} -> {}",
+            temp_path_clone.display(),
+            remote_path_clone
+        );
+
+        let debounce_duration = Duration::from_secs(2);
+        let mut last_upload: Option<Instant> = None;
+
+        // Block on the channel — this runs in a dedicated OS thread via spawn_blocking
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(event) => {
+                    // Only react to Modify or Create events for our specific file
+                    let dominated = matches!(
+                        event.kind,
+                        EventKind::Modify(_) | EventKind::Create(_)
+                    );
+                    let matches_file = event.paths.iter().any(|p| p == &temp_path_clone);
+
+                    if dominated && matches_file {
+                        // Debounce: skip if we uploaded very recently
+                        if let Some(last) = last_upload {
+                            if last.elapsed() < debounce_duration {
+                                continue;
+                            }
+                        }
+
+                        log::info!("File change detected, uploading: {}", file_name_clone);
+
+                        // Use a new tokio runtime handle to perform the async upload
+                        let rt = match tokio::runtime::Handle::try_current() {
+                            Ok(h) => h,
+                            Err(_) => {
+                                log::error!("No tokio runtime available for upload");
+                                continue;
+                            }
+                        };
+
+                        let handle_ref = handle_clone.clone();
+                        let rp = remote_path_clone.clone();
+                        let tp = temp_path_clone.clone();
+                        let app_ref = app_clone.clone();
+                        let fn_clone = file_name_clone.clone();
+
+                        let result = rt.block_on(async {
+                            upload_from_temp(&handle_ref, &tp, &rp).await
+                        });
+
+                        match result {
+                            Ok(()) => {
+                                last_upload = Some(Instant::now());
+                                let _ = app_ref.emit(
+                                    "edit-file-saved",
+                                    serde_json::json!({
+                                        "remote_path": rp,
+                                        "file_name": fn_clone,
+                                    }),
+                                );
+                                log::info!("Successfully uploaded: {}", fn_clone);
+                            }
+                            Err(e) => {
+                                let _ = app_ref.emit(
+                                    "edit-file-error",
+                                    serde_json::json!({
+                                        "remote_path": rp,
+                                        "file_name": fn_clone,
+                                        "error": e.to_string(),
+                                    }),
+                                );
+                                log::error!("Upload failed for {}: {}", fn_clone, e);
+                            }
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Keep looping — the watcher stays alive
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    log::info!("File watcher channel disconnected, stopping.");
+                    break;
+                }
+            }
+        }
+
+        // Cleanup: attempt to remove the temp file
+        let _ = std::fs::remove_file(&temp_path_clone);
+    });
+
     Ok(())
 }
