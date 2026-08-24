@@ -84,7 +84,8 @@ onMounted(async () => {
     lineHeight: settingsStore.appTheme === 'glass' ? 1.65 : 1,
     theme: settingsStore.appTheme === 'glass' ? glassTerminalTheme : settingsStore.currentTheme,
     allowProposedApi: true,
-    allowTransparency: true
+    allowTransparency: true,
+    convertEol: true,
   })
   
   // Update theme when it changes
@@ -250,7 +251,14 @@ const handlePaste = async () => {
         const text = await navigator.clipboard.readText()
         if (text) {
              const backendId = props.connectionId || props.sessionId
-             invoke('send_ssh_input', { id: backendId, data: text })
+             // Wrap multiline pastes in bracketed paste mode so the remote
+             // shell receives the entire block as a single paste event,
+             // preventing line-by-line execution and visual corruption.
+             const isMultiline = text.includes('\n') || text.includes('\r')
+             const payload = isMultiline
+                 ? `\x1b[200~${text}\x1b[201~`
+                 : text
+             invoke('send_ssh_input', { id: backendId, data: payload })
                 .catch(err => console.error('Failed to paste input', err))
         }
     } catch (err) {
