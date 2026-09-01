@@ -358,6 +358,14 @@ const split = async (direction: 'horizontal' | 'vertical', paneType: 'terminal' 
           </div>
       </div>
       
+      <!-- Context Menu Overlay (to catch clicks before xterm.js swallows them) -->
+      <div 
+        v-if="showContextMenu"
+        class="fixed inset-0 z-40"
+        @click="closeContextMenu"
+        @contextmenu.prevent="closeContextMenu"
+      ></div>
+      
       <!-- Context Menu -->
       <div 
         v-if="showContextMenu"
