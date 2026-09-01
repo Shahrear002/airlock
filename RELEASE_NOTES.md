@@ -1,3 +1,14 @@
+# Airlock v1.2.3 Release Notes
+
+This patch release fixes a double-spacing issue when pasting multiline text into terminal applications like vim.
+
+## 🐛 Bug Fixes
+
+### Terminal
+- **Newline Normalization**: Fixed an issue where pasting multiline text (like bash scripts) into the terminal, specifically inside vim, caused double-spacing due to Windows CRLF line endings. The clipboard paste logic now properly normalizes all line endings to a standard terminal carriage return (CR) before sending to the backend, ensuring perfect formatting.
+
+---
+
 # Airlock v1.2.2 Release Notes
 
 This release introduces the highly requested **Edit Locally** feature for SFTP and resolves some background noise issues.

@@ -116,7 +116,8 @@ onMounted(async () => {
   // Handle Input (Frontend -> Backend)
   term.onData((data) => {
     const backendId = props.connectionId || props.sessionId
-    invoke('send_ssh_input', { id: backendId, data })
+    const normalizedData = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r')
+    invoke('send_ssh_input', { id: backendId, data: normalizedData })
       .catch(err => console.error('Failed to send input', err))
   })
 
@@ -251,13 +252,16 @@ const handlePaste = async () => {
         const text = await navigator.clipboard.readText()
         if (text) {
              const backendId = props.connectionId || props.sessionId
+             // Normalize all line endings (\r\n or \n) to a single \r
+             const normalizedText = text.replace(/\r\n/g, '\r').replace(/\n/g, '\r')
+             
              // Wrap multiline pastes in bracketed paste mode so the remote
              // shell receives the entire block as a single paste event,
              // preventing line-by-line execution and visual corruption.
-             const isMultiline = text.includes('\n') || text.includes('\r')
+             const isMultiline = normalizedText.includes('\r')
              const payload = isMultiline
-                 ? `\x1b[200~${text}\x1b[201~`
-                 : text
+                 ? `\x1b[200~${normalizedText}\x1b[201~`
+                 : normalizedText
              invoke('send_ssh_input', { id: backendId, data: payload })
                 .catch(err => console.error('Failed to paste input', err))
         }
