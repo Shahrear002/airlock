@@ -21,6 +21,15 @@ Airlock allows you to view multiple sessions side-by-side using split panes.
 -   **Switching Tabs**: Click on the tab header to switch between different workspaces.
 -   **Closing Tabs**: Click the **X** icon on the tab header to close the tab and all sessions within it.
 
+## Keyboard Shortcuts
+
+Airlock supports standard terminal keyboard shortcuts to avoid conflicting with remote shell commands (like `SIGINT` interrupts):
+
+- **Copy (`Ctrl + Shift + C`)**: Copies the selected text to your clipboard.
+- **Paste (`Ctrl + Shift + V`)**: Pastes text from your clipboard into the terminal. Airlock normalizes line endings and uses bracketed paste mode so multiline commands paste cleanly without executing prematurely.
+
+*(Note: The standard `Ctrl + C` and `Ctrl + V` are intentionally left untouched so they can be used normally inside terminal applications like `vim` or running processes).*
+
 ## Context Menu Actions
 
 Right-clicking on the terminal brings up a context menu with the following options:

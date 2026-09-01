@@ -1,11 +1,17 @@
 # Airlock v1.2.3 Release Notes
 
-This patch release fixes a double-spacing issue when pasting multiline text into terminal applications like vim.
+This patch release fixes terminal pasting issues and introduces native copy/paste keyboard shortcuts for a smoother terminal experience.
+
+## ✨ New Features
+
+### Terminal
+- **Native Shortcuts**: Added support for standard terminal keyboard shortcuts (`Ctrl + Shift + C` to copy, `Ctrl + Shift + V` to paste). This allows you to easily copy and paste without conflicting with native interrupt signals like `Ctrl + C`.
 
 ## 🐛 Bug Fixes
 
 ### Terminal
-- **Newline Normalization**: Fixed an issue where pasting multiline text (like bash scripts) into the terminal, specifically inside vim, caused double-spacing due to Windows CRLF line endings. The clipboard paste logic now properly normalizes all line endings to a standard terminal carriage return (CR) before sending to the backend, ensuring perfect formatting.
+- **Newline Normalization**: Fixed an issue where pasting multiline text (like bash scripts) into the terminal caused double-spacing due to Windows CRLF line endings. All line endings are now properly normalized to a standard terminal carriage return (CR).
+- **Context Menu Interaction**: Fixed a bug where the right-click context menu inside the terminal could not be dismissed by clicking elsewhere on the screen.
 
 ---
 
