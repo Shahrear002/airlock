@@ -112,6 +112,23 @@ onMounted(async () => {
      hasSelection.value = term!.hasSelection()
   })
 
+  // Handle Custom Shortcuts (Copy/Paste)
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown') {
+      if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
+        //e.preventDefault()
+        handleCopy()
+        return false
+      }
+      if (e.ctrlKey && e.shiftKey && e.code === 'KeyV') {
+        e.preventDefault()
+        handlePaste()
+        return false
+      }
+    }
+    return true
+  })
+
 
   // Handle Input (Frontend -> Backend)
   term.onData((data) => {
