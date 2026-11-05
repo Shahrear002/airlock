@@ -106,10 +106,10 @@ const handleDialogClose = (open: boolean) => {
 <template>
   <Dialog :open="isOpen" @update:open="handleDialogClose">
     <DialogContent
-        class="sm:max-w-[540px] flex flex-col p-6 border shadow-2xl"
+        class="sm:max-w-[540px] flex flex-col p-6 border shadow-2xl theme-glass dark"
         :class="[
-            settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14]/95 !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.85)]' : 'bg-background border-border',
-            currentPrompt?.is_mismatch ? '!border-red-500/40' : ''
+            settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14]/95 !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.85)]' : 'bg-background border-border text-foreground',
+            currentPrompt?.is_mismatch ? '!border-red-500/50' : ''
         ]"
     >
       <DialogHeader>
