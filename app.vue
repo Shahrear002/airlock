@@ -9,6 +9,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import HostSidebar from './components/HostSidebar.vue'
 import SplitPaneLayout from './components/SplitPaneLayout.vue'
+import HostKeyPromptDialog from './components/HostKeyPromptDialog.vue'
 import { X, PanelLeft, PanelLeftClose, Minus, Square, X as CloseIcon } from 'lucide-vue-next'
 
 const sessionsStore = useSessionsStore()
@@ -240,6 +241,9 @@ onMounted(async () => {
         </div>
     </div>
   </div>
+
+  <!-- Global SSH Host Key Verification Prompt Dialog -->
+  <HostKeyPromptDialog />
 </template>
 
 

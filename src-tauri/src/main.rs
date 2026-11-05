@@ -6,7 +6,10 @@ mod sftp;
 mod vpn;
 
 use tauri::Emitter;
-use ssh_session::{AppState, connect_and_stream, SshInput};
+use ssh_session::{
+    AppState, connect_and_stream, SshInput,
+    respond_host_key, get_known_hosts, remove_known_host,
+};
 use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer, edit_remote_file};
 use vpn::{VpnState, ActiveTunnel, start_vpn_tunnel, stop_vpn_tunnel, get_vpn_status, start_openconnect_tunnel, send_mfa_token};
 
@@ -91,6 +94,9 @@ fn main() {
             send_ssh_input,
             disconnect_ssh,
             resize_pty,
+            respond_host_key,
+            get_known_hosts,
+            remove_known_host,
             // SFTP
             sftp_list_dir,
             local_list_dir,
