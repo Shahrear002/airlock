@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { FileCode, Folder, RefreshCw, X, Server, HardDrive, Loader2, FileEdit, Check, AlertCircle, Eye } from 'lucide-vue-next'
 import { useTabsStore } from '~/stores/tabs'
+import { useSettingsStore } from '~/stores/settings'
 import {
     ContextMenu,
     ContextMenuTrigger,
@@ -18,6 +19,7 @@ const props = defineProps<{
 }>()
 
 const tabsStore = useTabsStore()
+const settingsStore = useSettingsStore()
 
 interface FileEntry {
     name: string
@@ -339,7 +341,8 @@ const editLocally = async (fileName: string) => {
     try {
         await invoke('edit_remote_file', {
             id: backendId,
-            remotePath: fullPath
+            remotePath: fullPath,
+            editor: settingsStore.externalEditor || undefined
         })
     } catch (e: any) {
         showEditToast(`${e}`, 'error', fileName, 6000)

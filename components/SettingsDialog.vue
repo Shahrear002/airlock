@@ -15,7 +15,7 @@ import DialogTitle from '@/components/ui/dialog/DialogTitle.vue'
 import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import Label from '@/components/ui/label/Label.vue'
-import { ShieldCheck, Upload, Download, Loader2, Terminal as TerminalIcon, Plus, Trash2, RefreshCw, Copy, Check } from 'lucide-vue-next'
+import { ShieldCheck, Upload, Download, Loader2, Terminal as TerminalIcon, Plus, Trash2, RefreshCw, Copy, Check, FileCode } from 'lucide-vue-next'
 
 const props = defineProps<{
   open: boolean
@@ -258,6 +258,25 @@ const reset = () => {
                 <Plus class="w-4 h-4" />
               </Button>
             </div>
+          </div>
+        </div>
+
+        <!-- Editor & SFTP Settings (SEC-04) -->
+        <div class="space-y-4 border rounded-lg p-4 transition-colors" :class="settingsStore.appTheme === 'glass' ? 'bg-white/5 border-white/10' : 'bg-muted/20 border-border'">
+          <div class="flex items-center gap-2 font-semibold">
+            <FileCode class="w-4 h-4 text-sky-400" /> Editor & SFTP
+          </div>
+          <div class="space-y-2">
+            <Label :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/80' : ''">External Editor Command</Label>
+            <Input 
+              v-model="settingsStore.externalEditor" 
+              placeholder="e.g. code, notepad.exe, subl, gedit"
+              class="text-xs font-mono"
+              :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white' : ''"
+            />
+            <p class="text-[11px] leading-relaxed" :class="settingsStore.appTheme === 'glass' ? 'text-white/60' : 'text-muted-foreground'">
+              Command or executable used for "Edit Locally" in SFTP. If empty, files in the safe text allowlist open in your system default editor, while non-allowlisted files (scripts, batch files, executables) open strictly as text via Notepad on Windows or require an editor here.
+            </p>
           </div>
         </div>
 

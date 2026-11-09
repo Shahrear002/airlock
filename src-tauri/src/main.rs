@@ -80,6 +80,9 @@ async fn resize_pty(
 }
 
 fn main() {
+    // SEC-04: Purge orphaned temp edit files from previous crashes or ungraceful exits
+    sftp::cleanup_temp_edits();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_log::Builder::default().build())
@@ -139,6 +142,7 @@ fn main() {
                         }
                         None => {}
                     }
+                    sftp::cleanup_temp_edits();
                 });
             }
         })

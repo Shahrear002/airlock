@@ -37,6 +37,23 @@ Airlock cryptographically verifies the identity of SSH servers to protect agains
 - Both interactive terminal sessions and SFTP transfers share the same verified SSH connection handler.
 - We do **not** use any intermediate relay or telemetry servers. All connections are strictly point-to-point.
 
+## SFTP Security & File Handling
+
+Airlock enforces strict isolation and sanitization guarantees across all SFTP operations:
+
+1. **Path Traversal & Device Name Sanitization:**
+   - All downloaded file and directory names are sanitized before being mapped to the local filesystem.
+   - Remote directory entries containing traversal elements (`..`, absolute paths, control characters, null bytes) are blocked and confined strictly inside the target destination folder.
+   - On Windows, NTFS Alternate Data Streams (`:`) and reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) are rejected to prevent file system hijacking. On Unix systems, legitimate POSIX names containing colons remain fully supported.
+   - Symlinks are detected via `symlink_metadata` and skipped during recursive transfers to prevent arbitrary local directory exfiltration.
+
+2. **Sandboxed Local File Editing:**
+   - **Safe Extension Allowlist:** Only verified text and source-code formats (`.txt`, `.md`, `.json`, `.rs`, `.py`, `.ts`, `.html`, etc.) may open via the default system handler.
+   - **Execution Shielding:** Executable binaries, scripts, and batch files (`.bat`, `.cmd`, `.vbs`, `.ps1`, `.exe`, `.hta`) are strictly prohibited from invoking shell associations (`open::that`). On Windows, these files fall back safely to opening directly as text inside `notepad.exe`.
+   - **Custom External Editor:** You can configure a preferred text editor (e.g. `code`, `subl`, `notepad.exe`, `gedit`) under **Settings & Security > Editor & SFTP**. Configured editors are invoked directly with the file path without shell interpolation.
+   - **Safe Temp Lifecycle & Leak Prevention:** Edited files are stored in a restricted temporary folder (`airlock_edits`). File watchers monitor session liveness and automatically delete temporary files upon session termination or application exit. Any orphaned files from previous crashes are purged on startup.
+   - **Memory Ceiling:** A strict 20 MB streaming byte limit is enforced during downloads and in-memory reads to prevent memory exhaustion (OOM).
+
 ## Recommendations
 
 - Always verify the fingerprint displayed in the Trust-On-First-Use dialog against your server administrator's known fingerprint.
