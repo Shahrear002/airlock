@@ -24,6 +24,7 @@ const maximizeWindow = () => appWindow.toggleMaximize()
 const closeWindow = () => appWindow.close()
 
 const isSidebarOpen = ref(true)
+const isMac = ref(false)
 
 // ── Resizable sidebar ─────────────────────────────────────────────────────────
 const sidebarWidth = ref(260)
@@ -90,6 +91,16 @@ const handleConnect = async (connectionDetails: any) => {
     }
 }
 onMounted(async () => {
+    if (typeof navigator !== 'undefined') {
+        isMac.value = /Macintosh|Mac OS X/i.test(navigator.userAgent) || 
+                      (navigator.platform && navigator.platform.toUpperCase().indexOf('MAC') >= 0)
+    }
+    try {
+        const platform = await invoke<string>('get_platform')
+        isMac.value = platform === 'macos'
+    } catch {
+        // Fallback to navigator heuristic
+    }
     await vpnStore.init()
 })
 </script>
@@ -101,10 +112,33 @@ onMounted(async () => {
         <div class="absolute rounded-full blur-[90px] opacity-35 w-[380px] h-[380px] -bottom-[120px] -right-[60px] bg-[radial-gradient(circle,_#6C63FF,_transparent_70%)]"></div>
     </div>
 
-    <div class="titlebar relative z-10">
-        <div class="tb-brand"><span class="chevron">&gt;_</span> Airlock</div>
+    <div class="titlebar relative z-10" :class="isMac ? '!pl-0' : ''">
+        <!-- macOS Traffic Lights (Left) -->
+        <div v-if="isMac" class="flex items-center gap-2 pl-3.5 pr-2.5 h-full group" style="-webkit-app-region: no-drag;">
+            <button @click="closeWindow" class="w-3 h-3 rounded-full bg-[#FF5F56] border border-[#E0443E] flex items-center justify-center cursor-pointer transition-transform active:scale-90" title="Close">
+                <svg class="w-1.5 h-1.5 opacity-0 group-hover:opacity-100 text-[#4D0000]" viewBox="0 0 6 6" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <line x1="1" y1="1" x2="5" y2="5" />
+                    <line x1="5" y1="1" x2="1" y2="5" />
+                </svg>
+            </button>
+            <button @click="minimizeWindow" class="w-3 h-3 rounded-full bg-[#FFBD2E] border border-[#DEA123] flex items-center justify-center cursor-pointer transition-transform active:scale-90" title="Minimize">
+                <svg class="w-1.5 h-1.5 opacity-0 group-hover:opacity-100 text-[#995700]" viewBox="0 0 6 6" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <line x1="1" y1="3" x2="5" y2="3" />
+                </svg>
+            </button>
+            <button @click="maximizeWindow" class="w-3 h-3 rounded-full bg-[#27C93F] border border-[#1AAB29] flex items-center justify-center cursor-pointer transition-transform active:scale-90" title="Zoom">
+                <svg class="w-1.5 h-1.5 opacity-0 group-hover:opacity-100 text-[#006500]" viewBox="0 0 6 6" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <line x1="1" y1="3" x2="5" y2="3" />
+                    <line x1="3" y1="1" x2="3" y2="5" />
+                </svg>
+            </button>
+        </div>
+
+        <div class="tb-brand" :class="isMac ? 'ml-1' : ''"><span class="chevron">&gt;_</span> Airlock</div>
         <div class="tb-spacer"></div>
-        <div class="win-controls">
+
+        <!-- Windows / Linux Controls (Right) -->
+        <div v-if="!isMac" class="win-controls">
             <div class="win-btn" title="Minimize" @click="minimizeWindow"><svg viewBox="0 0 10 10"><rect x="0" y="4.5" width="10" height="1" fill="currentColor"/></svg></div>
             <div class="win-btn" title="Maximize" @click="maximizeWindow"><svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg></div>
             <div class="win-btn close" title="Close" @click="closeWindow"><svg viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.1"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.1"/></svg></div>
@@ -167,12 +201,35 @@ onMounted(async () => {
 
   <div v-else class="flex flex-col h-screen w-screen overflow-hidden text-foreground bg-background font-sans relative transition-colors duration-300">
     <!-- Titlebar (Default Theme) -->
-    <div class="h-[38px] flex-shrink-0 flex items-center pl-4 bg-[#FAFAFB] border-b border-border" style="-webkit-app-region: drag;">
-        <div class="flex items-center gap-2 text-[13px] font-semibold tracking-wide text-zinc-800">
+    <div class="h-[38px] flex-shrink-0 flex items-center bg-[#FAFAFB] border-b border-border" :class="isMac ? 'pl-0' : 'pl-4'" style="-webkit-app-region: drag;">
+        <!-- macOS Traffic Lights (Left) -->
+        <div v-if="isMac" class="flex items-center gap-2 pl-3.5 pr-2.5 h-full group" style="-webkit-app-region: no-drag;">
+            <button @click="closeWindow" class="w-3 h-3 rounded-full bg-[#FF5F56] border border-[#E0443E] flex items-center justify-center cursor-pointer transition-transform active:scale-90" title="Close">
+                <svg class="w-1.5 h-1.5 opacity-0 group-hover:opacity-100 text-[#4D0000]" viewBox="0 0 6 6" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <line x1="1" y1="1" x2="5" y2="5" />
+                    <line x1="5" y1="1" x2="1" y2="5" />
+                </svg>
+            </button>
+            <button @click="minimizeWindow" class="w-3 h-3 rounded-full bg-[#FFBD2E] border border-[#DEA123] flex items-center justify-center cursor-pointer transition-transform active:scale-90" title="Minimize">
+                <svg class="w-1.5 h-1.5 opacity-0 group-hover:opacity-100 text-[#995700]" viewBox="0 0 6 6" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <line x1="1" y1="3" x2="5" y2="3" />
+                </svg>
+            </button>
+            <button @click="maximizeWindow" class="w-3 h-3 rounded-full bg-[#27C93F] border border-[#1AAB29] flex items-center justify-center cursor-pointer transition-transform active:scale-90" title="Zoom">
+                <svg class="w-1.5 h-1.5 opacity-0 group-hover:opacity-100 text-[#006500]" viewBox="0 0 6 6" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <line x1="1" y1="3" x2="5" y2="3" />
+                    <line x1="3" y1="1" x2="3" y2="5" />
+                </svg>
+            </button>
+        </div>
+
+        <div class="flex items-center gap-2 text-[13px] font-semibold tracking-wide text-zinc-800" :class="isMac ? 'ml-1' : ''">
             <span class="text-[#2D8CFF] font-bold">&gt;_</span> Airlock
         </div>
         <div class="flex-1 h-full" style="-webkit-app-region: drag;"></div>
-        <div class="flex items-center h-full" style="-webkit-app-region: no-drag;">
+
+        <!-- Windows / Linux Controls (Right) -->
+        <div v-if="!isMac" class="flex items-center h-full" style="-webkit-app-region: no-drag;">
             <div class="w-[38px] h-[38px] flex items-center justify-center cursor-pointer text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 transition-colors" @click="minimizeWindow"><svg viewBox="0 0 10 10" class="w-[10px] h-[10px]"><rect x="0" y="4.5" width="10" height="1" fill="currentColor"/></svg></div>
             <div class="w-[38px] h-[38px] flex items-center justify-center cursor-pointer text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 transition-colors" @click="maximizeWindow"><svg viewBox="0 0 10 10" class="w-[10px] h-[10px]"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg></div>
             <div class="w-[38px] h-[38px] flex items-center justify-center cursor-pointer text-zinc-500 hover:bg-[#E81123] hover:text-white transition-colors" @click="closeWindow"><svg viewBox="0 0 10 10" class="w-[10px] h-[10px]"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.1"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.1"/></svg></div>

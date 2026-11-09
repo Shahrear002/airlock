@@ -76,6 +76,11 @@ async fn resize_pty(
     }
 }
 
+#[tauri::command]
+fn get_platform() -> &'static str {
+    std::env::consts::OS
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_sql::Builder::default().build())
@@ -86,6 +91,7 @@ fn main() {
         .manage(AppState::new())
         .manage(VpnState::new())
         .invoke_handler(tauri::generate_handler![
+            get_platform,
             // SSH
             connect_ssh,
             send_ssh_input,
