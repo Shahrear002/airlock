@@ -963,10 +963,23 @@ mod tests {
         assert!(!is_path_confined(base, Path::new("../../etc/passwd")));
         assert!(!is_path_confined(base, Path::new("sub/../../escape.txt")));
 
-        // Windows drive traversal
-        let win_base = Path::new(r"C:\Users\User\Downloads");
-        assert!(is_path_confined(win_base, Path::new("safe.txt")));
-        assert!(!is_path_confined(win_base, Path::new(r"..\..\Windows\System32\cmd.exe")));
+        #[cfg(windows)]
+        {
+            // Windows drive traversal
+            let win_base = Path::new(r"C:\Users\User\Downloads");
+            assert!(is_path_confined(win_base, Path::new("safe.txt")));
+            assert!(!is_path_confined(win_base, Path::new(r"..\..\Windows\System32\cmd.exe")));
+            assert!(!is_path_confined(win_base, Path::new(r"C:\Windows\System32\cmd.exe")));
+        }
+
+        #[cfg(unix)]
+        {
+            let unix_base = Path::new("/home/user/downloads");
+            assert!(is_path_confined(unix_base, Path::new("safe.txt")));
+            assert!(is_path_confined(unix_base, Path::new("nested/dir/safe.txt")));
+            assert!(!is_path_confined(unix_base, Path::new("../../etc/shadow")));
+            assert!(!is_path_confined(unix_base, Path::new("/etc/shadow")));
+        }
     }
 
     #[test]
