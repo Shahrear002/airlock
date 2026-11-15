@@ -37,6 +37,7 @@ base64 = "0.22"
 notify = { version = "7", features = ["macos_kqueue"] }
 tempfile = "3"
 open = "5"
+dunce = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.4"

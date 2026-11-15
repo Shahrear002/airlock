@@ -121,6 +121,56 @@ pub fn is_path_confined(base_dir: &Path, target: &Path) -> bool {
     norm_target.starts_with(&norm_base)
 }
 
+/// Validate that target path is not an existing symlink.
+pub async fn validate_download_target(target: &Path) -> Result<(), String> {
+    if let Ok(meta) = tokio::fs::symlink_metadata(target).await {
+        if meta.is_symlink() {
+            return Err(format!("Target path '{}' is a symlink; download refused for security", target.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Validate and resolve a remote path and destination directory into a safe local target path.
+pub fn resolve_download_target_with_rules(
+    remote_path: &str,
+    dest_dir: &Path,
+    is_windows: bool,
+) -> Result<(PathBuf, String, PathBuf), String> {
+    let raw_name = remote_path
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .ok_or_else(|| "Remote path has no valid filename".to_string())?;
+
+    if raw_name == "." || raw_name == ".." || raw_name.contains('/') || raw_name.contains('\0') {
+        return Err(format!("Unsafe remote filename rejected: {:?}", raw_name));
+    }
+
+    let sanitized_name = sanitize_name_with_rules(raw_name, is_windows)?;
+
+    let dest_canon = dunce::canonicalize(dest_dir)
+        .map_err(|e| format!("Destination directory does not exist or is inaccessible: {}", e))?;
+    if !dest_canon.is_dir() {
+        return Err("Destination path is not a directory".into());
+    }
+
+    let target = dest_canon.join(&sanitized_name);
+
+    if !is_path_confined(&dest_canon, &target) {
+        return Err("Path traversal detected outside destination folder".into());
+    }
+
+    Ok((dest_canon, sanitized_name, target))
+}
+
+/// Validate and resolve a remote path and destination directory string using runtime OS rules.
+pub fn resolve_download_target(
+    remote_path: &str,
+    destination_dir: &str,
+) -> Result<(PathBuf, String, PathBuf), String> {
+    resolve_download_target_with_rules(remote_path, Path::new(destination_dir), cfg!(windows))
+}
+
 /// Get or create the secure temporary directory for local file editing.
 pub fn get_airlock_temp_dir() -> Result<PathBuf, std::io::Error> {
     let dir = std::env::temp_dir().join("airlock_edits");
@@ -498,8 +548,11 @@ pub async fn sftp_download(
     id: String,
     transfer_id: String,
     remote_path: String,
-    local_path: String,
+    destination_dir: String,
 ) -> Result<(), String> {
+    let (dest_canon, _sanitized_name, target) = resolve_download_target(&remote_path, &destination_dir)?;
+    validate_download_target(&target).await?;
+
     let handle = {
         let connections = state.connections.lock().await;
         let conn = connections.get(&id).ok_or("Session not found")?;
@@ -520,19 +573,11 @@ pub async fn sftp_download(
     channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
     let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?;
 
-    let dest_path = PathBuf::from(&local_path);
-    // Base destination confinement anchor: if downloading a file, anchor to parent dir; if dir, anchor to dest_path
-    let base_destination = if dest_path.is_dir() {
-        dest_path.clone()
-    } else {
-        dest_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| dest_path.clone())
-    };
-
     let res = download_recursive(
         &sftp,
         Path::new(&remote_path),
-        &dest_path,
-        &base_destination,
+        &target,
+        &dest_canon,
         cancel_token,
         &app,
         &transfer_id,
@@ -999,6 +1044,74 @@ mod tests {
         assert!(!is_safe_text_extension("hta"));
         assert!(!is_safe_text_extension("lnk"));
         assert!(!is_safe_text_extension(""));
+    }
+
+    #[test]
+    fn test_top_level_download_confinement() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path();
+
+        // (a) a name like "..\..\evil.txt" is rejected on Windows and treated as one ordinary file name on Unix
+        #[cfg(windows)]
+        {
+            let res_win = resolve_download_target_with_rules(r"/remote/..\..\evil.txt", dest, true);
+            assert!(res_win.is_err(), "Expected backslash path to be rejected on Windows");
+            assert_eq!(sanitize_name_with_rules(r"..\..\evil.txt", false).unwrap(), r"..\..\evil.txt");
+        }
+
+        #[cfg(unix)]
+        {
+            let res_unix = resolve_download_target_with_rules(r"/remote/..\..\evil.txt", dest, false);
+            assert!(res_unix.is_ok(), "Expected backslash path to be treated as ordinary file name on Unix");
+            let (dest_c, name_unix, target_unix) = res_unix.unwrap();
+            assert_eq!(name_unix, r"..\..\evil.txt");
+            assert_eq!(target_unix, dest_c.join(r"..\..\evil.txt"));
+        }
+
+        // (b) C:evil.txt is rejected (cfg windows)
+        #[cfg(windows)]
+        {
+            let res_drive = resolve_download_target_with_rules("/remote/C:evil.txt", dest, true);
+            assert!(res_drive.is_err(), "Expected C:evil.txt to be rejected on Windows");
+        }
+
+        // Rejection of "." and ".." and names with '/' or NUL
+        assert!(resolve_download_target_with_rules("/remote/.", dest, true).is_err());
+        assert!(resolve_download_target_with_rules("/remote/..", dest, true).is_err());
+        assert!(resolve_download_target_with_rules("/remote/foo\0bar", dest, true).is_err());
+
+        // (d) a normal name downloads into destination_dir
+        let res_normal = resolve_download_target_with_rules("/var/log/report.txt", dest, cfg!(windows)).unwrap();
+        assert_eq!(res_normal.1, "report.txt");
+        assert_eq!(res_normal.2, res_normal.0.join("report.txt"));
+        assert!(is_path_confined(&res_normal.0, &res_normal.2));
+
+        // (e) the circular-anchor case: <dest>/../../evil.txt must fail confinement against the chosen folder
+        let circular_target = dest.join("../../evil.txt");
+        let circular_base = circular_target.parent().unwrap();
+        assert!(is_path_confined(circular_base, &circular_target), "Old circular anchor incorrectly allowed traversal");
+        assert!(
+            !is_path_confined(dest, &circular_target),
+            "<dest>/../../evil.txt must fail confinement against the chosen folder"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_target_symlink_refused_unix() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path();
+
+        let real_file = dest.join("real_target.txt");
+        tokio::fs::write(&real_file, b"test content").await.unwrap();
+
+        let link_target = dest.join("symlink_target.txt");
+        symlink(&real_file, &link_target).unwrap();
+
+        // (c) a symlink at the target is refused
+        assert!(validate_download_target(&link_target).await.is_err(), "Symlink at target must be refused");
+        assert!(validate_download_target(&real_file).await.is_ok(), "Regular file must be accepted");
     }
 
     #[test]

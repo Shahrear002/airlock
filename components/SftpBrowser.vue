@@ -283,9 +283,8 @@ const doDropLocal = async (item: {name: string, type: string}) => {
     try {
         const backendId = props.connectionId || props.sessionId
         const rPath = joinPath(remotePath.value, item.name)
-        const lPath = joinPath(localPath.value, item.name)
         
-        await invoke('sftp_download', { id: backendId, transferId: tId, remotePath: rPath, localPath: lPath })
+        await invoke('sftp_download', { id: backendId, transferId: tId, remotePath: rPath, destinationDir: localPath.value })
         loadLocalDir(localPath.value)
     } catch (e: any) {
         if (!e.toString().includes('cancelled')) {
