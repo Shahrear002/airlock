@@ -1,13 +1,13 @@
 use russh::*;
 use russh_keys::key;
 
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tauri::{Emitter, Manager};
-use std::collections::HashMap;
-use tokio::sync::Mutex;
-use std::sync::atomic::AtomicBool;
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use tauri::{Emitter, Manager};
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 // Input types for the SSH loop
 pub enum SshInput {
@@ -52,7 +52,8 @@ pub struct KnownHostItem {
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, ActiveSession>>>,
     pub active_transfers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    pub host_key_prompts: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HostKeyDecision>>>>,
+    pub host_key_prompts:
+        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HostKeyDecision>>>>,
 }
 
 impl AppState {
@@ -73,7 +74,11 @@ pub fn get_known_hosts_path(app: &tauri::AppHandle) -> std::path::PathBuf {
     base_dir.join("known_hosts")
 }
 
-pub fn remove_known_host_entry<P: AsRef<std::path::Path>>(path: P, host: &str, port: u16) -> Result<(), std::io::Error> {
+pub fn remove_known_host_entry<P: AsRef<std::path::Path>>(
+    path: P,
+    host: &str,
+    port: u16,
+) -> Result<(), std::io::Error> {
     let p = path.as_ref();
     if !p.exists() {
         return Ok(());
@@ -109,7 +114,9 @@ pub fn remove_known_host_entry<P: AsRef<std::path::Path>>(path: P, host: &str, p
     Ok(())
 }
 
-pub fn list_known_hosts<P: AsRef<std::path::Path>>(path: P) -> Result<Vec<KnownHostItem>, std::io::Error> {
+pub fn list_known_hosts<P: AsRef<std::path::Path>>(
+    path: P,
+) -> Result<Vec<KnownHostItem>, std::io::Error> {
     let p = path.as_ref();
     if !p.exists() {
         return Ok(vec![]);
@@ -123,9 +130,15 @@ pub fn list_known_hosts<P: AsRef<std::path::Path>>(path: P) -> Result<Vec<KnownH
             continue;
         }
         let mut parts = trimmed.split_whitespace();
-        let Some(host_part) = parts.next() else { continue };
-        let Some(key_type) = parts.next() else { continue };
-        let Some(b64_key) = parts.next() else { continue };
+        let Some(host_part) = parts.next() else {
+            continue;
+        };
+        let Some(key_type) = parts.next() else {
+            continue;
+        };
+        let Some(b64_key) = parts.next() else {
+            continue;
+        };
 
         let (host, port) = if host_part.starts_with('[') {
             if let Some(idx) = host_part.find("]:") {
@@ -174,9 +187,7 @@ pub async fn respond_host_key(
 }
 
 #[tauri::command]
-pub async fn get_known_hosts(
-    app: tauri::AppHandle,
-) -> Result<Vec<KnownHostItem>, String> {
+pub async fn get_known_hosts(app: tauri::AppHandle) -> Result<Vec<KnownHostItem>, String> {
     let path = get_known_hosts_path(&app);
     list_known_hosts(path).map_err(|e| e.to_string())
 }
@@ -204,22 +215,36 @@ pub struct Client {
 #[async_trait]
 impl client::Handler for Client {
     type Error = russh::Error;
-    
+
     async fn check_server_key(
         &mut self,
         server_public_key: &key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        let check = russh_keys::check_known_hosts_path(&self.host, self.port, server_public_key, &self.known_hosts_path);
+        let check = russh_keys::check_known_hosts_path(
+            &self.host,
+            self.port,
+            server_public_key,
+            &self.known_hosts_path,
+        );
         match check {
             Ok(true) => {
-                log::info!("SSH host key verified from known_hosts for {}:{}", self.host, self.port);
+                log::info!(
+                    "SSH host key verified from known_hosts for {}:{}",
+                    self.host,
+                    self.port
+                );
                 Ok(true)
             }
             Ok(false) => {
                 // Unknown host key: Trust-On-First-Use (TOFU) flow
                 let fingerprint = format!("SHA256:{}", server_public_key.fingerprint());
                 let key_type = server_public_key.name().to_string();
-                log::warn!("Unknown SSH host key for {}:{} ({}) - requesting TOFU confirmation", self.host, self.port, fingerprint);
+                log::warn!(
+                    "Unknown SSH host key for {}:{} ({}) - requesting TOFU confirmation",
+                    self.host,
+                    self.port,
+                    fingerprint
+                );
 
                 let (tx, rx) = tokio::sync::oneshot::channel::<HostKeyDecision>();
                 {
@@ -241,19 +266,33 @@ impl client::Handler for Client {
                 let _ = self.app_handle.emit("ssh-host-key-prompt", payload);
 
                 // Wait up to 60 seconds for user confirmation
-                let decision = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-                    Ok(Ok(d)) => d,
-                    _ => HostKeyDecision::Reject,
-                };
+                let decision =
+                    match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+                        Ok(Ok(d)) => d,
+                        _ => HostKeyDecision::Reject,
+                    };
 
                 match decision {
                     HostKeyDecision::Accept | HostKeyDecision::Replace => {
-                        let _ = russh_keys::learn_known_hosts_path(&self.host, self.port, server_public_key, &self.known_hosts_path);
-                        log::info!("Learned trusted SSH host key for {}:{}", self.host, self.port);
+                        let _ = russh_keys::learn_known_hosts_path(
+                            &self.host,
+                            self.port,
+                            server_public_key,
+                            &self.known_hosts_path,
+                        );
+                        log::info!(
+                            "Learned trusted SSH host key for {}:{}",
+                            self.host,
+                            self.port
+                        );
                         Ok(true)
                     }
                     HostKeyDecision::Reject => {
-                        log::warn!("User rejected unknown SSH host key for {}:{}", self.host, self.port);
+                        log::warn!(
+                            "User rejected unknown SSH host key for {}:{}",
+                            self.host,
+                            self.port
+                        );
                         Ok(false)
                     }
                 }
@@ -262,10 +301,19 @@ impl client::Handler for Client {
                 // Host key MISMATCH: potential Man-in-the-Middle attack
                 let fingerprint = format!("SHA256:{}", server_public_key.fingerprint());
                 let key_type = server_public_key.name().to_string();
-                let existing_keys = russh_keys::known_host_keys_path(&self.host, self.port, &self.known_hosts_path).unwrap_or_default();
-                let existing_fp = existing_keys.first().map(|(_, k)| format!("SHA256:{}", k.fingerprint()));
+                let existing_keys =
+                    russh_keys::known_host_keys_path(&self.host, self.port, &self.known_hosts_path)
+                        .unwrap_or_default();
+                let existing_fp = existing_keys
+                    .first()
+                    .map(|(_, k)| format!("SHA256:{}", k.fingerprint()));
 
-                log::error!("CRITICAL: SSH host key mismatch detected for {}:{} at line {}", self.host, self.port, line);
+                log::error!(
+                    "CRITICAL: SSH host key mismatch detected for {}:{} at line {}",
+                    self.host,
+                    self.port,
+                    line
+                );
 
                 let (tx, rx) = tokio::sync::oneshot::channel::<HostKeyDecision>();
                 {
@@ -286,26 +334,46 @@ impl client::Handler for Client {
 
                 let _ = self.app_handle.emit("ssh-host-key-prompt", payload);
 
-                let decision = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-                    Ok(Ok(d)) => d,
-                    _ => HostKeyDecision::Reject,
-                };
+                let decision =
+                    match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+                        Ok(Ok(d)) => d,
+                        _ => HostKeyDecision::Reject,
+                    };
 
                 match decision {
                     HostKeyDecision::Replace => {
-                        let _ = remove_known_host_entry(&self.known_hosts_path, &self.host, self.port);
-                        let _ = russh_keys::learn_known_hosts_path(&self.host, self.port, server_public_key, &self.known_hosts_path);
-                        log::info!("Replaced SSH host key for {}:{} in known_hosts", self.host, self.port);
+                        let _ =
+                            remove_known_host_entry(&self.known_hosts_path, &self.host, self.port);
+                        let _ = russh_keys::learn_known_hosts_path(
+                            &self.host,
+                            self.port,
+                            server_public_key,
+                            &self.known_hosts_path,
+                        );
+                        log::info!(
+                            "Replaced SSH host key for {}:{} in known_hosts",
+                            self.host,
+                            self.port
+                        );
                         Ok(true)
                     }
                     _ => {
-                        log::warn!("Connection aborted due to SSH host key mismatch for {}:{}", self.host, self.port);
+                        log::warn!(
+                            "Connection aborted due to SSH host key mismatch for {}:{}",
+                            self.host,
+                            self.port
+                        );
                         Ok(false)
                     }
                 }
             }
             Err(e) => {
-                log::error!("Error reading known_hosts for {}:{}: {}", self.host, self.port, e);
+                log::error!(
+                    "Error reading known_hosts for {}:{}: {}",
+                    self.host,
+                    self.port,
+                    e
+                );
                 Ok(false)
             }
         }
@@ -348,8 +416,10 @@ pub async fn connect_and_stream(
 
     let mut channel = session.channel_open_session().await?;
     // request_pty takes (want_reply, term, col_width, row_height, pix_width, pix_height, modes)
-    channel.request_pty(false, "xterm-256color", cols, rows, 0, 0, &[]).await?;
-    channel.request_shell(false).await?; 
+    channel
+        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
+        .await?;
+    channel.request_shell(false).await?;
 
     // Create channel for input from Frontend -> SSH
     // CHANGED: Use SshInput enum
@@ -359,10 +429,13 @@ pub async fn connect_and_stream(
     {
         let state = app_handle.state::<AppState>();
         let mut connections = state.connections.lock().await;
-        connections.insert(id.clone(), ActiveSession { 
-            handle: Arc::new(Mutex::new(session)),
-            terminal_tx: Some(tx) 
-        });
+        connections.insert(
+            id.clone(),
+            ActiveSession {
+                handle: Arc::new(Mutex::new(session)),
+                terminal_tx: Some(tx),
+            },
+        );
     }
 
     let id_clone = id.clone();
@@ -375,14 +448,14 @@ pub async fn connect_and_stream(
                 // Read from SSH Channel -> Send to Frontend
                 msg = channel.wait() => {
                     match msg {
-                        Some(ChannelMsg::Data { ref data }) => { 
+                        Some(ChannelMsg::Data { ref data }) => {
                             let _ = app_handle_clone.emit(&format!("ssh-output-{}", id_clone), data.to_vec());
                         }
-                        Some(ChannelMsg::ExitStatus { exit_status }) => { 
+                        Some(ChannelMsg::ExitStatus { exit_status }) => {
                              let _ = app_handle_clone.emit(&format!("ssh-exit-{}", id_clone), exit_status);
                              break;
                         }
-                        Some(ChannelMsg::Close) | None => { 
+                        Some(ChannelMsg::Close) | None => {
                             break;
                         }
                          _ => {}
@@ -406,7 +479,7 @@ pub async fn connect_and_stream(
                 }
             }
         }
-        
+
         // Cleanup - only remove terminal_tx, keep connection alive for other subsystems
         let state = app_handle_clone.state::<AppState>();
         let mut connections = state.connections.lock().await;
@@ -417,7 +490,6 @@ pub async fn connect_and_stream(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -460,7 +532,10 @@ mod tests {
 
         // 5. Port distinction: different port on same host is treated as unknown host
         let res = russh_keys::check_known_hosts_path(host, 2222, &pk1, &path).unwrap();
-        assert!(!res, "Different port must be treated as a distinct host entry");
+        assert!(
+            !res,
+            "Different port must be treated as a distinct host entry"
+        );
 
         // 6. List known hosts
         let entries = list_known_hosts(&path).unwrap();

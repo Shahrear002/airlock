@@ -1,17 +1,22 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod ssh_session;
 mod sftp;
+mod ssh_session;
 mod vpn;
 
-use tauri::Emitter;
-use ssh_session::{
-    AppState, connect_and_stream, SshInput,
-    respond_host_key, get_known_hosts, remove_known_host,
+use sftp::{
+    cancel_transfer, edit_remote_file, get_local_home_dir, local_list_dir, sftp_download,
+    sftp_list_dir, sftp_upload,
 };
-use sftp::{sftp_list_dir, local_list_dir, get_local_home_dir, sftp_upload, sftp_download, cancel_transfer, edit_remote_file};
-use vpn::{VpnState, ActiveTunnel, start_vpn_tunnel, stop_vpn_tunnel, get_vpn_status, start_openconnect_tunnel, send_mfa_token};
+use ssh_session::{
+    connect_and_stream, get_known_hosts, remove_known_host, respond_host_key, AppState, SshInput,
+};
+use tauri::Emitter;
+use vpn::{
+    get_vpn_status, send_mfa_token, start_openconnect_tunnel, start_vpn_tunnel, stop_vpn_tunnel,
+    ActiveTunnel, VpnState,
+};
 
 #[tauri::command]
 async fn connect_ssh(
@@ -26,7 +31,18 @@ async fn connect_ssh(
 ) -> Result<(), String> {
     let app_clone = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = connect_and_stream(id.clone(), host, port, user, password, cols, rows, app_clone).await {
+        if let Err(e) = connect_and_stream(
+            id.clone(),
+            host,
+            port,
+            user,
+            password,
+            cols,
+            rows,
+            app_clone,
+        )
+        .await
+        {
             let _ = app.emit(&format!("ssh-error-{}", id), e.to_string());
         }
     });
@@ -49,10 +65,7 @@ async fn send_ssh_input(
 }
 
 #[tauri::command]
-async fn disconnect_ssh(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
+async fn disconnect_ssh(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let mut connections = state.connections.lock().await;
     if connections.remove(&id).is_some() {
         Ok(())
@@ -122,13 +135,16 @@ fn main() {
                 let vpn_state = window.state::<VpnState>();
                 let tunnel = vpn_state.tunnel.clone();
                 tauri::async_runtime::block_on(async move {
-                    let mut t: tokio::sync::MutexGuard<'_, Option<ActiveTunnel>> = tunnel.lock().await;
+                    let mut t: tokio::sync::MutexGuard<'_, Option<ActiveTunnel>> =
+                        tunnel.lock().await;
                     match t.take() {
                         #[cfg(target_os = "windows")]
                         Some(ActiveTunnel::WireGuard(handle)) => {
                             handle.outbound_task.abort();
                             handle.inbound_task.abort();
-                            if let Some(k) = handle.keepalive_task { k.abort(); }
+                            if let Some(k) = handle.keepalive_task {
+                                k.abort();
+                            }
                             drop(handle._adapter);
                             log::info!("WireGuard tunnel torn down on app close");
                         }

@@ -1,13 +1,13 @@
 use crate::ssh_session::AppState;
-use tauri::State;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tauri::State;
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Serialize)]
 struct TransferProgress {
@@ -29,11 +29,9 @@ pub struct FileEntry {
 /// via the system default handler. Non-allowlisted extensions (executables, scripts,
 /// batch files) must never be launched via shell associations.
 pub const SAFE_TEXT_EXTENSIONS: &[&str] = &[
-    "txt", "md", "markdown", "json", "json5", "yml", "yaml", "toml",
-    "ini", "conf", "cfg", "log", "env", "diff", "patch",
-    "rs", "go", "c", "cpp", "cc", "cxx", "h", "hpp", "java", "kt",
-    "ts", "jsx", "tsx", "vue", "svelte",
-    "css", "scss", "sass", "less", "sql"
+    "txt", "md", "markdown", "json", "json5", "yml", "yaml", "toml", "ini", "conf", "cfg", "log",
+    "env", "diff", "patch", "rs", "go", "c", "cpp", "cc", "cxx", "h", "hpp", "java", "kt", "ts",
+    "jsx", "tsx", "vue", "svelte", "css", "scss", "sass", "less", "sql",
 ];
 
 /// Strict allowlist of exact filenames that can be opened via the system default handler.
@@ -207,9 +205,8 @@ pub fn sanitize_name_with_rules(name: &str, is_windows: bool) -> Result<String, 
         let upper = clean.to_ascii_uppercase();
         let base_stem = upper.split('.').next().unwrap_or("");
         const RESERVED: &[&str] = &[
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
         ];
         if RESERVED.contains(&base_stem) {
             return Err(format!("Reserved Windows device name: {base_stem}"));
@@ -231,7 +228,9 @@ pub fn is_path_confined(base_dir: &Path, target: &Path) -> bool {
     let mut norm_base = PathBuf::new();
     for component in base_dir.components() {
         match component {
-            std::path::Component::ParentDir => { norm_base.pop(); }
+            std::path::Component::ParentDir => {
+                norm_base.pop();
+            }
             std::path::Component::CurDir => {}
             c => norm_base.push(c),
         }
@@ -263,7 +262,10 @@ pub fn is_path_confined(base_dir: &Path, target: &Path) -> bool {
 pub async fn validate_download_target(target: &Path) -> Result<(), String> {
     if let Ok(meta) = tokio::fs::symlink_metadata(target).await {
         if meta.is_symlink() {
-            return Err(format!("Target path '{}' is a symlink; download refused for security", target.display()));
+            return Err(format!(
+                "Target path '{}' is a symlink; download refused for security",
+                target.display()
+            ));
         }
     }
     Ok(())
@@ -286,8 +288,12 @@ pub fn resolve_download_target_with_rules(
 
     let sanitized_name = sanitize_name_with_rules(raw_name, is_windows)?;
 
-    let dest_canon = dunce::canonicalize(dest_dir)
-        .map_err(|e| format!("Destination directory does not exist or is inaccessible: {}", e))?;
+    let dest_canon = dunce::canonicalize(dest_dir).map_err(|e| {
+        format!(
+            "Destination directory does not exist or is inaccessible: {}",
+            e
+        )
+    })?;
     if !dest_canon.is_dir() {
         return Err("Destination path is not a directory".into());
     }
@@ -360,8 +366,13 @@ pub async fn sftp_list_dir(
         let h = handle.lock().await;
         h.channel_open_session().await.map_err(|e| e.to_string())?
     };
-    channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
-    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| e.to_string())?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| e.to_string())?;
 
     let dir = sftp.read_dir(&path).await.map_err(|e| format!("{:?}", e))?;
     let mut entries = Vec::new();
@@ -380,11 +391,9 @@ pub async fn sftp_list_dir(
         });
     }
 
-    entries.sort_by(|a, b| {
-        match b.is_dir.cmp(&a.is_dir) {
-            std::cmp::Ordering::Equal => a.name.cmp(&b.name),
-            other => other,
-        }
+    entries.sort_by(|a, b| match b.is_dir.cmp(&a.is_dir) {
+        std::cmp::Ordering::Equal => a.name.cmp(&b.name),
+        other => other,
     });
 
     Ok(entries)
@@ -393,7 +402,9 @@ pub async fn sftp_list_dir(
 #[tauri::command]
 pub async fn local_list_dir(path: String) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
-    let mut dir = tokio::fs::read_dir(&path).await.map_err(|e| e.to_string())?;
+    let mut dir = tokio::fs::read_dir(&path)
+        .await
+        .map_err(|e| e.to_string())?;
 
     while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -405,15 +416,20 @@ pub async fn local_list_dir(path: String) -> Result<Vec<FileEntry>, String> {
             name,
             is_dir: metadata.is_dir(),
             size: metadata.len(),
-            mtime: metadata.modified().map(|m| m.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()).unwrap_or(0),
+            mtime: metadata
+                .modified()
+                .map(|m| {
+                    m.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                })
+                .unwrap_or(0),
         });
     }
 
-    entries.sort_by(|a, b| {
-        match b.is_dir.cmp(&a.is_dir) {
-            std::cmp::Ordering::Equal => a.name.cmp(&b.name),
-            other => other,
-        }
+    entries.sort_by(|a, b| match b.is_dir.cmp(&a.is_dir) {
+        std::cmp::Ordering::Equal => a.name.cmp(&b.name),
+        other => other,
     });
 
     Ok(entries)
@@ -435,10 +451,15 @@ async fn upload_recursive(
     transfer_id: &str,
 ) -> Result<(), String> {
     // SEC-05: Use symlink_metadata to prevent following directory symlinks recursively
-    let metadata = tokio::fs::symlink_metadata(local_path).await.map_err(|e| e.to_string())?;
+    let metadata = tokio::fs::symlink_metadata(local_path)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if metadata.is_symlink() {
-        log::warn!("Skipping local symlink during upload: {}", local_path.display());
+        log::warn!(
+            "Skipping local symlink during upload: {}",
+            local_path.display()
+        );
         return Ok(());
     }
 
@@ -446,7 +467,9 @@ async fn upload_recursive(
         let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
         let _ = sftp.create_dir(&remote_path_str).await;
 
-        let mut entries = tokio::fs::read_dir(local_path).await.map_err(|e| e.to_string())?;
+        let mut entries = tokio::fs::read_dir(local_path)
+            .await
+            .map_err(|e| e.to_string())?;
         while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
             if cancel_token.load(Ordering::Relaxed) {
                 return Err("Transfer cancelled by user".into());
@@ -454,24 +477,44 @@ async fn upload_recursive(
             let entry_path = entry.path();
             let entry_name = entry.file_name();
             let remote_entry_path = remote_path.join(&entry_name);
-            Box::pin(upload_recursive(sftp, &entry_path, &remote_entry_path, cancel_token.clone(), app, transfer_id)).await?;
+            Box::pin(upload_recursive(
+                sftp,
+                &entry_path,
+                &remote_entry_path,
+                cancel_token.clone(),
+                app,
+                transfer_id,
+            ))
+            .await?;
         }
     } else {
-        let mut local_file = tokio::fs::File::open(local_path).await.map_err(|e| e.to_string())?;
+        let mut local_file = tokio::fs::File::open(local_path)
+            .await
+            .map_err(|e| e.to_string())?;
         let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
-        let mut remote_file = sftp.create(&remote_path_str).await.map_err(|e| e.to_string())?;
-        
+        let mut remote_file = sftp
+            .create(&remote_path_str)
+            .await
+            .map_err(|e| e.to_string())?;
+
         let total_size = metadata.len();
         let mut transferred_size = 0u64;
-        let file_name = local_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        
-        let _ = app.emit("transfer-progress", TransferProgress {
-            transfer_id: transfer_id.to_string(),
-            transferred: transferred_size,
-            total: total_size,
-            file_name: file_name.clone(),
-        });
-        
+        let file_name = local_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        let _ = app.emit(
+            "transfer-progress",
+            TransferProgress {
+                transfer_id: transfer_id.to_string(),
+                transferred: transferred_size,
+                total: total_size,
+                file_name: file_name.clone(),
+            },
+        );
+
         let mut buf = vec![0; 65536];
         let mut chunks = 0;
         loop {
@@ -479,28 +522,39 @@ async fn upload_recursive(
                 return Err("Transfer cancelled by user".into());
             }
             let n = local_file.read(&mut buf).await.map_err(|e| e.to_string())?;
-            if n == 0 { break; }
-            remote_file.write_all(&buf[..n]).await.map_err(|e| e.to_string())?;
-            
+            if n == 0 {
+                break;
+            }
+            remote_file
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| e.to_string())?;
+
             transferred_size += n as u64;
             chunks += 1;
             if chunks % 8 == 0 || transferred_size == total_size {
-                let _ = app.emit("transfer-progress", TransferProgress {
-                    transfer_id: transfer_id.to_string(),
-                    transferred: transferred_size,
-                    total: total_size,
-                    file_name: file_name.clone(),
-                });
+                let _ = app.emit(
+                    "transfer-progress",
+                    TransferProgress {
+                        transfer_id: transfer_id.to_string(),
+                        transferred: transferred_size,
+                        total: total_size,
+                        file_name: file_name.clone(),
+                    },
+                );
             }
         }
-        
+
         if total_size == 0 {
-            let _ = app.emit("transfer-progress", TransferProgress {
-                transfer_id: transfer_id.to_string(),
-                transferred: 0,
-                total: 0,
-                file_name: file_name.clone(),
-            });
+            let _ = app.emit(
+                "transfer-progress",
+                TransferProgress {
+                    transfer_id: transfer_id.to_string(),
+                    transferred: 0,
+                    total: 0,
+                    file_name: file_name.clone(),
+                },
+            );
         }
     }
 
@@ -526,10 +580,12 @@ async fn download_recursive(
     }
 
     let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
-    
+
     match sftp.read_dir(&remote_path_str).await {
         Ok(dir) => {
-            tokio::fs::create_dir_all(local_path).await.map_err(|e| e.to_string())?;
+            tokio::fs::create_dir_all(local_path)
+                .await
+                .map_err(|e| e.to_string())?;
             for entry in dir {
                 if cancel_token.load(Ordering::Relaxed) {
                     return Err("Transfer cancelled by user".into());
@@ -571,66 +627,95 @@ async fn download_recursive(
                     cancel_token.clone(),
                     app,
                     transfer_id,
-                )).await?;
+                ))
+                .await?;
             }
         }
         Err(_) => {
             // Ensure destination directory exists
             if let Some(parent) = local_path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
 
-            let mut remote_file = sftp.open(&remote_path_str).await.map_err(|e| e.to_string())?;
-            let mut local_file = tokio::fs::File::create(local_path).await.map_err(|e| e.to_string())?;
-            
+            let mut remote_file = sftp
+                .open(&remote_path_str)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut local_file = tokio::fs::File::create(local_path)
+                .await
+                .map_err(|e| e.to_string())?;
+
             let total_size = match sftp.metadata(&remote_path_str).await {
                 Ok(meta) => meta.size.unwrap_or(0),
                 Err(_) => 0,
             };
-            
+
             let mut transferred_size = 0u64;
-            let file_name = local_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            
-            let _ = app.emit("transfer-progress", TransferProgress {
-                transfer_id: transfer_id.to_string(),
-                transferred: transferred_size,
-                total: total_size,
-                file_name: file_name.clone(),
-            });
-            
+            let file_name = local_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+
+            let _ = app.emit(
+                "transfer-progress",
+                TransferProgress {
+                    transfer_id: transfer_id.to_string(),
+                    transferred: transferred_size,
+                    total: total_size,
+                    file_name: file_name.clone(),
+                },
+            );
+
             let mut buf = vec![0; 65536];
             let mut chunks = 0;
             loop {
                 if cancel_token.load(Ordering::Relaxed) {
                     return Err("Transfer cancelled by user".into());
                 }
-                let n = remote_file.read(&mut buf).await.map_err(|e| e.to_string())?;
-                if n == 0 { break; }
-                local_file.write_all(&buf[..n]).await.map_err(|e| e.to_string())?;
-                
+                let n = remote_file
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                local_file
+                    .write_all(&buf[..n])
+                    .await
+                    .map_err(|e| e.to_string())?;
+
                 transferred_size += n as u64;
                 chunks += 1;
                 if chunks % 8 == 0 || transferred_size == total_size {
-                    let _ = app.emit("transfer-progress", TransferProgress {
-                        transfer_id: transfer_id.to_string(),
-                        transferred: transferred_size,
-                        total: total_size,
-                        file_name: file_name.clone(),
-                    });
+                    let _ = app.emit(
+                        "transfer-progress",
+                        TransferProgress {
+                            transfer_id: transfer_id.to_string(),
+                            transferred: transferred_size,
+                            total: total_size,
+                            file_name: file_name.clone(),
+                        },
+                    );
                 }
             }
-            
+
             if total_size == 0 {
-                let _ = app.emit("transfer-progress", TransferProgress {
-                    transfer_id: transfer_id.to_string(),
-                    transferred: 0,
-                    total: 0,
-                    file_name: file_name.clone(),
-                });
+                let _ = app.emit(
+                    "transfer-progress",
+                    TransferProgress {
+                        transfer_id: transfer_id.to_string(),
+                        transferred: 0,
+                        total: 0,
+                        file_name: file_name.clone(),
+                    },
+                );
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -648,7 +733,7 @@ pub async fn sftp_upload(
         let conn = connections.get(&id).ok_or("Session not found")?;
         conn.handle.clone()
     };
-    
+
     let cancel_token = Arc::new(AtomicBool::new(false));
     {
         let mut transfers = state.active_transfers.lock().await;
@@ -659,9 +744,14 @@ pub async fn sftp_upload(
         let h = handle.lock().await;
         h.channel_open_session().await.map_err(|e| e.to_string())?
     };
-    
-    channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
-    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?;
+
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| e.to_string())?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| e.to_string())?;
 
     let res = upload_recursive(
         &sftp,
@@ -670,7 +760,8 @@ pub async fn sftp_upload(
         cancel_token,
         &app,
         &transfer_id,
-    ).await;
+    )
+    .await;
 
     {
         let mut transfers = state.active_transfers.lock().await;
@@ -688,7 +779,8 @@ pub async fn sftp_download(
     remote_path: String,
     destination_dir: String,
 ) -> Result<(), String> {
-    let (dest_canon, _sanitized_name, target) = resolve_download_target(&remote_path, &destination_dir)?;
+    let (dest_canon, _sanitized_name, target) =
+        resolve_download_target(&remote_path, &destination_dir)?;
     validate_download_target(&target).await?;
 
     let handle = {
@@ -696,7 +788,7 @@ pub async fn sftp_download(
         let conn = connections.get(&id).ok_or("Session not found")?;
         conn.handle.clone()
     };
-    
+
     let cancel_token = Arc::new(AtomicBool::new(false));
     {
         let mut transfers = state.active_transfers.lock().await;
@@ -707,9 +799,14 @@ pub async fn sftp_download(
         let h = handle.lock().await;
         h.channel_open_session().await.map_err(|e| e.to_string())?
     };
-    
-    channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
-    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?;
+
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| e.to_string())?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| e.to_string())?;
 
     let res = download_recursive(
         &sftp,
@@ -719,7 +816,8 @@ pub async fn sftp_download(
         cancel_token,
         &app,
         &transfer_id,
-    ).await;
+    )
+    .await;
 
     {
         let mut transfers = state.active_transfers.lock().await;
@@ -797,9 +895,7 @@ pub async fn edit_remote_file(
     // 2. Open SFTP channel and check file size
     let channel = {
         let h = handle.lock().await;
-        h.channel_open_session()
-            .await
-            .map_err(|e| e.to_string())?
+        h.channel_open_session().await.map_err(|e| e.to_string())?
     };
     channel
         .request_subsystem(true, "sftp")
@@ -854,10 +950,7 @@ pub async fn edit_remote_file(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let raw_ext = remote_p
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let raw_ext = remote_p.extension().and_then(|e| e.to_str()).unwrap_or("");
     let extension = if raw_ext.is_empty() {
         String::new()
     } else {
@@ -881,7 +974,9 @@ pub async fn edit_remote_file(
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
 
     // Write contents and persist
-    let (mut file, temp_path) = temp_file.keep().map_err(|e| format!("Failed to persist temp file: {}", e))?;
+    let (mut file, temp_path) = temp_file
+        .keep()
+        .map_err(|e| format!("Failed to persist temp file: {}", e))?;
     use std::io::Write;
     file.write_all(&contents)
         .map_err(|e| format!("Failed to write temp file: {}", e))?;
@@ -907,13 +1002,16 @@ pub async fn edit_remote_file(
         OpenMethod::ConfiguredEditor => {
             let cmd_str = custom_editor.unwrap();
             let mut parts = cmd_str.split_whitespace();
-            let program = parts.next().ok_or_else(|| "Invalid editor command".to_string())?;
+            let program = parts
+                .next()
+                .ok_or_else(|| "Invalid editor command".to_string())?;
             let mut cmd = std::process::Command::new(program);
             for arg in parts {
                 cmd.arg(arg);
             }
             cmd.arg(&temp_path);
-            cmd.spawn().map_err(|e| format!("Failed to launch configured editor '{}': {}", cmd_str, e))?;
+            cmd.spawn()
+                .map_err(|e| format!("Failed to launch configured editor '{}': {}", cmd_str, e))?;
         }
         OpenMethod::SystemDefault => {
             open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
@@ -923,8 +1021,11 @@ pub async fn edit_remote_file(
                 "Non-allowlisted file '{}' opened safely with explicit notepad.exe",
                 file_name
             );
-            let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-            let mut notepad_path = PathBuf::from(&system_root).join("System32").join("notepad.exe");
+            let system_root =
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let mut notepad_path = PathBuf::from(&system_root)
+                .join("System32")
+                .join("notepad.exe");
             if !notepad_path.exists() {
                 notepad_path = PathBuf::from("C:\\Windows\\System32\\notepad.exe");
                 if !notepad_path.exists() {
@@ -933,25 +1034,36 @@ pub async fn edit_remote_file(
             }
             let mut cmd = std::process::Command::new(&notepad_path);
             cmd.arg(&temp_path);
-            cmd.spawn().map_err(|e| format!("Failed to open in Notepad ('{}'): {}", notepad_path.display(), e))?;
+            cmd.spawn().map_err(|e| {
+                format!(
+                    "Failed to open in Notepad ('{}'): {}",
+                    notepad_path.display(),
+                    e
+                )
+            })?;
         }
         OpenMethod::MacosOpenText => {
             let mut cmd = std::process::Command::new("open");
             cmd.arg("-t").arg(&temp_path);
-            cmd.spawn().map_err(|e| format!("Failed to open default editor via open -t: {}", e))?;
+            cmd.spawn()
+                .map_err(|e| format!("Failed to open default editor via open -t: {}", e))?;
         }
         OpenMethod::LinuxXdgOpen => {
             let mut cmd = std::process::Command::new("xdg-open");
             cmd.arg(&temp_path);
-            cmd.spawn().map_err(|e| format!("Failed to open file via xdg-open: {}", e))?;
+            cmd.spawn()
+                .map_err(|e| format!("Failed to open file via xdg-open: {}", e))?;
         }
     }
 
     // 6. Emit "opened" event
-    let _ = app.emit("edit-file-opened", serde_json::json!({
-        "remote_path": remote_path,
-        "file_name": file_name,
-    }));
+    let _ = app.emit(
+        "edit-file-opened",
+        serde_json::json!({
+            "remote_path": remote_path,
+            "file_name": file_name,
+        }),
+    );
 
     // 7. Spawn the file watcher with session liveness checks and guaranteed cleanup
     let handle_clone = handle.clone();
@@ -984,9 +1096,7 @@ pub async fn edit_remote_file(
             }
         };
 
-        let parent_dir = temp_path_clone
-            .parent()
-            .unwrap_or(&temp_path_clone);
+        let parent_dir = temp_path_clone.parent().unwrap_or(&temp_path_clone);
         if let Err(e) = watcher.watch(parent_dir, RecursiveMode::NonRecursive) {
             log::error!("Failed to start watching: {}", e);
             let _ = std::fs::remove_file(&temp_path_clone);
@@ -1005,7 +1115,10 @@ pub async fn edit_remote_file(
         loop {
             // SEC-04: Terminate watcher if temp file was deleted
             if !temp_path_clone.exists() {
-                log::info!("Temp file removed, stopping watcher: {}", temp_path_clone.display());
+                log::info!(
+                    "Temp file removed, stopping watcher: {}",
+                    temp_path_clone.display()
+                );
                 break;
             }
 
@@ -1022,10 +1135,8 @@ pub async fn edit_remote_file(
 
             match rx.recv_timeout(Duration::from_secs(3)) {
                 Ok(event) => {
-                    let dominated = matches!(
-                        event.kind,
-                        EventKind::Modify(_) | EventKind::Create(_)
-                    );
+                    let dominated =
+                        matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
                     let matches_file = event.paths.iter().any(|p| p == &temp_path_clone);
 
                     if dominated && matches_file {
@@ -1051,9 +1162,8 @@ pub async fn edit_remote_file(
                         let app_ref = app_clone.clone();
                         let fn_clone = file_name_clone.clone();
 
-                        let result = rt.block_on(async {
-                            upload_from_temp(&handle_ref, &tp, &rp).await
-                        });
+                        let result =
+                            rt.block_on(async { upload_from_temp(&handle_ref, &tp, &rp).await });
 
                         match result {
                             Ok(()) => {
@@ -1129,9 +1239,18 @@ mod tests {
         assert!(sanitize_name_with_rules("com1.txt", true).is_err());
         assert!(sanitize_name_with_rules("lpt3", true).is_err());
         // Trailing dots and spaces stripped on Windows
-        assert_eq!(sanitize_name_with_rules("test.txt...", true).unwrap(), "test.txt");
-        assert_eq!(sanitize_name_with_rules("test.txt   ", true).unwrap(), "test.txt");
-        assert_eq!(sanitize_name_with_rules("test.txt. . ", true).unwrap(), "test.txt");
+        assert_eq!(
+            sanitize_name_with_rules("test.txt...", true).unwrap(),
+            "test.txt"
+        );
+        assert_eq!(
+            sanitize_name_with_rules("test.txt   ", true).unwrap(),
+            "test.txt"
+        );
+        assert_eq!(
+            sanitize_name_with_rules("test.txt. . ", true).unwrap(),
+            "test.txt"
+        );
     }
 
     #[test]
@@ -1146,7 +1265,10 @@ mod tests {
             "log:12:00:00.txt"
         );
         // Reserved Windows names are permitted on Unix
-        assert_eq!(sanitize_name_with_rules("con.txt", false).unwrap(), "con.txt");
+        assert_eq!(
+            sanitize_name_with_rules("con.txt", false).unwrap(),
+            "con.txt"
+        );
         assert_eq!(sanitize_name_with_rules("nul", false).unwrap(), "nul");
     }
 
@@ -1169,15 +1291,24 @@ mod tests {
             // Windows drive traversal
             let win_base = Path::new(r"C:\Users\User\Downloads");
             assert!(is_path_confined(win_base, Path::new("safe.txt")));
-            assert!(!is_path_confined(win_base, Path::new(r"..\..\Windows\System32\cmd.exe")));
-            assert!(!is_path_confined(win_base, Path::new(r"C:\Windows\System32\cmd.exe")));
+            assert!(!is_path_confined(
+                win_base,
+                Path::new(r"..\..\Windows\System32\cmd.exe")
+            ));
+            assert!(!is_path_confined(
+                win_base,
+                Path::new(r"C:\Windows\System32\cmd.exe")
+            ));
         }
 
         #[cfg(unix)]
         {
             let unix_base = Path::new("/home/user/downloads");
             assert!(is_path_confined(unix_base, Path::new("safe.txt")));
-            assert!(is_path_confined(unix_base, Path::new("nested/dir/safe.txt")));
+            assert!(is_path_confined(
+                unix_base,
+                Path::new("nested/dir/safe.txt")
+            ));
             assert!(!is_path_confined(unix_base, Path::new("../../etc/shadow")));
             assert!(!is_path_confined(unix_base, Path::new("/etc/shadow")));
         }
@@ -1193,10 +1324,14 @@ mod tests {
 
         // Script, executable, spreadsheet, and xml extensions must be rejected (case-insensitive)
         for ext in &[
-            "js", "py", "sh", "bash", "html", "htm", "csv", "tsv", "mjs", "cjs", "JS", "Py",
-            "xml", "bat", "cmd", "exe", "vbs", "ps1", "hta", "lnk", ""
+            "js", "py", "sh", "bash", "html", "htm", "csv", "tsv", "mjs", "cjs", "JS", "Py", "xml",
+            "bat", "cmd", "exe", "vbs", "ps1", "hta", "lnk", "",
         ] {
-            assert!(!is_safe_text_extension(ext), "Extension {:?} should be rejected", ext);
+            assert!(
+                !is_safe_text_extension(ext),
+                "Extension {:?} should be rejected",
+                ext
+            );
         }
     }
 
@@ -1209,8 +1344,8 @@ mod tests {
         assert!(!is_safe_file_for_open("data.csv"));
         assert!(!is_safe_file_for_open("run.sh"));
         assert!(!is_safe_file_for_open("notes.txt ")); // trailing space rejected
-        assert!(!is_safe_file_for_open("run.bat."));  // trailing dot rejected
-        assert!(!is_safe_file_for_open("run.js "));   // trailing space rejected
+        assert!(!is_safe_file_for_open("run.bat.")); // trailing dot rejected
+        assert!(!is_safe_file_for_open("run.js ")); // trailing space rejected
         assert!(!is_safe_file_for_open("a.txt.js"));
         assert!(!is_safe_file_for_open(".js"));
         assert!(!is_safe_file_for_open("data.tsv"));
@@ -1228,13 +1363,26 @@ mod tests {
     #[test]
     fn test_choose_open_method_matrix() {
         // 1. With configured editor (has_editor = true) -> always OpenMethod::ConfiguredEditor across all OSes
-        for os in &[TargetOs::Windows, TargetOs::Macos, TargetOs::Linux, TargetOs::Other] {
-            for file in &["notes.txt", "x.js", "page.html", "run.bat.", "notes.txt ", "Dockerfile"] {
+        for os in &[
+            TargetOs::Windows,
+            TargetOs::Macos,
+            TargetOs::Linux,
+            TargetOs::Other,
+        ] {
+            for file in &[
+                "notes.txt",
+                "x.js",
+                "page.html",
+                "run.bat.",
+                "notes.txt ",
+                "Dockerfile",
+            ] {
                 assert_eq!(
                     choose_open_method(*os, file, true),
                     Ok(OpenMethod::ConfiguredEditor),
                     "OS {:?} with file {:?} and has_editor=true must return ConfiguredEditor",
-                    os, file
+                    os,
+                    file
                 );
             }
         }
@@ -1242,32 +1390,89 @@ mod tests {
         // 2. Without editor (has_editor = false)
         // Windows:
         // Allowlisted files -> SystemDefault
-        assert_eq!(choose_open_method(TargetOs::Windows, "notes.txt", false), Ok(OpenMethod::SystemDefault));
-        assert_eq!(choose_open_method(TargetOs::Windows, "a b.txt", false), Ok(OpenMethod::SystemDefault));
-        assert_eq!(choose_open_method(TargetOs::Windows, "Dockerfile", false), Ok(OpenMethod::SystemDefault));
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "notes.txt", false),
+            Ok(OpenMethod::SystemDefault)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "a b.txt", false),
+            Ok(OpenMethod::SystemDefault)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "Dockerfile", false),
+            Ok(OpenMethod::SystemDefault)
+        );
         // Non-allowlisted files -> WindowsNotepad
-        assert_eq!(choose_open_method(TargetOs::Windows, "x.js", false), Ok(OpenMethod::WindowsNotepad));
-        assert_eq!(choose_open_method(TargetOs::Windows, "x.PY", false), Ok(OpenMethod::WindowsNotepad));
-        assert_eq!(choose_open_method(TargetOs::Windows, "page.html", false), Ok(OpenMethod::WindowsNotepad));
-        assert_eq!(choose_open_method(TargetOs::Windows, "data.csv", false), Ok(OpenMethod::WindowsNotepad));
-        assert_eq!(choose_open_method(TargetOs::Windows, "run.sh", false), Ok(OpenMethod::WindowsNotepad));
-        assert_eq!(choose_open_method(TargetOs::Windows, "notes.txt ", false), Ok(OpenMethod::WindowsNotepad));
-        assert_eq!(choose_open_method(TargetOs::Windows, "run.bat.", false), Ok(OpenMethod::WindowsNotepad));
-        assert_eq!(choose_open_method(TargetOs::Windows, "file.xml", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "x.js", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "x.PY", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "page.html", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "data.csv", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "run.sh", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "notes.txt ", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "run.bat.", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Windows, "file.xml", false),
+            Ok(OpenMethod::WindowsNotepad)
+        );
 
         // macOS:
         // Always MacosOpenText regardless of file type when no editor configured
-        assert_eq!(choose_open_method(TargetOs::Macos, "notes.txt", false), Ok(OpenMethod::MacosOpenText));
-        assert_eq!(choose_open_method(TargetOs::Macos, "x.js", false), Ok(OpenMethod::MacosOpenText));
-        assert_eq!(choose_open_method(TargetOs::Macos, "page.html", false), Ok(OpenMethod::MacosOpenText));
-        assert_eq!(choose_open_method(TargetOs::Macos, "Dockerfile", false), Ok(OpenMethod::MacosOpenText));
-        assert_eq!(choose_open_method(TargetOs::Macos, "notes.txt ", false), Ok(OpenMethod::MacosOpenText));
+        assert_eq!(
+            choose_open_method(TargetOs::Macos, "notes.txt", false),
+            Ok(OpenMethod::MacosOpenText)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Macos, "x.js", false),
+            Ok(OpenMethod::MacosOpenText)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Macos, "page.html", false),
+            Ok(OpenMethod::MacosOpenText)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Macos, "Dockerfile", false),
+            Ok(OpenMethod::MacosOpenText)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Macos, "notes.txt ", false),
+            Ok(OpenMethod::MacosOpenText)
+        );
 
         // Linux:
         // Allowlisted files -> LinuxXdgOpen
-        assert_eq!(choose_open_method(TargetOs::Linux, "notes.txt", false), Ok(OpenMethod::LinuxXdgOpen));
-        assert_eq!(choose_open_method(TargetOs::Linux, "a b.txt", false), Ok(OpenMethod::LinuxXdgOpen));
-        assert_eq!(choose_open_method(TargetOs::Linux, "Dockerfile", false), Ok(OpenMethod::LinuxXdgOpen));
+        assert_eq!(
+            choose_open_method(TargetOs::Linux, "notes.txt", false),
+            Ok(OpenMethod::LinuxXdgOpen)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Linux, "a b.txt", false),
+            Ok(OpenMethod::LinuxXdgOpen)
+        );
+        assert_eq!(
+            choose_open_method(TargetOs::Linux, "Dockerfile", false),
+            Ok(OpenMethod::LinuxXdgOpen)
+        );
         // Non-allowlisted files -> Err
         assert!(choose_open_method(TargetOs::Linux, "x.js", false).is_err());
         assert!(choose_open_method(TargetOs::Linux, "x.PY", false).is_err());
@@ -1279,7 +1484,10 @@ mod tests {
         assert!(choose_open_method(TargetOs::Linux, "file.xml", false).is_err());
 
         // Other:
-        assert_eq!(choose_open_method(TargetOs::Other, "notes.txt", false), Ok(OpenMethod::SystemDefault));
+        assert_eq!(
+            choose_open_method(TargetOs::Other, "notes.txt", false),
+            Ok(OpenMethod::SystemDefault)
+        );
         assert!(choose_open_method(TargetOs::Other, "x.js", false).is_err());
     }
 
@@ -1292,14 +1500,24 @@ mod tests {
         #[cfg(windows)]
         {
             let res_win = resolve_download_target_with_rules(r"/remote/..\..\evil.txt", dest, true);
-            assert!(res_win.is_err(), "Expected backslash path to be rejected on Windows");
-            assert_eq!(sanitize_name_with_rules(r"..\..\evil.txt", false).unwrap(), r"..\..\evil.txt");
+            assert!(
+                res_win.is_err(),
+                "Expected backslash path to be rejected on Windows"
+            );
+            assert_eq!(
+                sanitize_name_with_rules(r"..\..\evil.txt", false).unwrap(),
+                r"..\..\evil.txt"
+            );
         }
 
         #[cfg(unix)]
         {
-            let res_unix = resolve_download_target_with_rules(r"/remote/..\..\evil.txt", dest, false);
-            assert!(res_unix.is_ok(), "Expected backslash path to be treated as ordinary file name on Unix");
+            let res_unix =
+                resolve_download_target_with_rules(r"/remote/..\..\evil.txt", dest, false);
+            assert!(
+                res_unix.is_ok(),
+                "Expected backslash path to be treated as ordinary file name on Unix"
+            );
             let (dest_c, name_unix, target_unix) = res_unix.unwrap();
             assert_eq!(name_unix, r"..\..\evil.txt");
             assert_eq!(target_unix, dest_c.join(r"..\..\evil.txt"));
@@ -1315,7 +1533,10 @@ mod tests {
         #[cfg(windows)]
         {
             let res_drive = resolve_download_target_with_rules("/remote/C:evil.txt", dest, true);
-            assert!(res_drive.is_err(), "Expected C:evil.txt to be rejected on Windows");
+            assert!(
+                res_drive.is_err(),
+                "Expected C:evil.txt to be rejected on Windows"
+            );
         }
     }
 
@@ -1341,15 +1562,24 @@ mod tests {
         assert!(resolve_download_target_with_rules("", dest, cfg!(windows)).is_err());
 
         // Trailing slashes should resolve the last non-empty segment
-        let res_trailing = resolve_download_target_with_rules("/remote/my_folder/", dest, cfg!(windows)).unwrap();
+        let res_trailing =
+            resolve_download_target_with_rules("/remote/my_folder/", dest, cfg!(windows)).unwrap();
         assert_eq!(res_trailing.1, "my_folder");
         assert_eq!(res_trailing.2, res_trailing.0.join("my_folder"));
         assert!(is_path_confined(&res_trailing.0, &res_trailing.2));
 
-        let res_multi_trailing = resolve_download_target_with_rules("/remote/another_folder///", dest, cfg!(windows)).unwrap();
+        let res_multi_trailing =
+            resolve_download_target_with_rules("/remote/another_folder///", dest, cfg!(windows))
+                .unwrap();
         assert_eq!(res_multi_trailing.1, "another_folder");
-        assert_eq!(res_multi_trailing.2, res_multi_trailing.0.join("another_folder"));
-        assert!(is_path_confined(&res_multi_trailing.0, &res_multi_trailing.2));
+        assert_eq!(
+            res_multi_trailing.2,
+            res_multi_trailing.0.join("another_folder")
+        );
+        assert!(is_path_confined(
+            &res_multi_trailing.0,
+            &res_multi_trailing.2
+        ));
     }
 
     #[test]
@@ -1358,7 +1588,8 @@ mod tests {
         let dest = temp.path();
 
         // (d) a normal name downloads into destination_dir
-        let res_normal = resolve_download_target_with_rules("/var/log/report.txt", dest, cfg!(windows)).unwrap();
+        let res_normal =
+            resolve_download_target_with_rules("/var/log/report.txt", dest, cfg!(windows)).unwrap();
         assert_eq!(res_normal.1, "report.txt");
         assert_eq!(res_normal.2, res_normal.0.join("report.txt"));
         assert!(is_path_confined(&res_normal.0, &res_normal.2));
@@ -1372,7 +1603,10 @@ mod tests {
         // (e) the circular-anchor case: <dest>/../../evil.txt must fail confinement against the chosen folder
         let circular_target = dest.join("../../evil.txt");
         let circular_base = circular_target.parent().unwrap();
-        assert!(is_path_confined(circular_base, &circular_target), "Old circular anchor incorrectly allowed traversal");
+        assert!(
+            is_path_confined(circular_base, &circular_target),
+            "Old circular anchor incorrectly allowed traversal"
+        );
         assert!(
             !is_path_confined(dest, &circular_target),
             "<dest>/../../evil.txt must fail confinement against the chosen folder"
@@ -1393,8 +1627,14 @@ mod tests {
         symlink(&real_file, &link_target).unwrap();
 
         // (c) a symlink at the target is refused
-        assert!(validate_download_target(&link_target).await.is_err(), "Symlink at target must be refused");
-        assert!(validate_download_target(&real_file).await.is_ok(), "Regular file must be accepted");
+        assert!(
+            validate_download_target(&link_target).await.is_err(),
+            "Symlink at target must be refused"
+        );
+        assert!(
+            validate_download_target(&real_file).await.is_ok(),
+            "Regular file must be accepted"
+        );
     }
 
     #[test]
@@ -1406,6 +1646,9 @@ mod tests {
         assert!(test_file.exists());
 
         cleanup_temp_edits();
-        assert!(!test_file.exists(), "Cleanup must purge orphaned edit files");
+        assert!(
+            !test_file.exists(),
+            "Cleanup must purge orphaned edit files"
+        );
     }
 }

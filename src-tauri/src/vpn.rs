@@ -7,19 +7,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
-use base64::Engine as _;
-#[cfg(target_os = "windows")]
 use base64::engine::general_purpose::STANDARD as BASE64;
+#[cfg(target_os = "windows")]
+use base64::Engine as _;
 #[cfg(target_os = "windows")]
 use boringtun::noise::{Tunn, TunnResult};
 #[cfg(target_os = "windows")]
-use boringtun::x25519::{StaticSecret, PublicKey};
+use boringtun::x25519::{PublicKey, StaticSecret};
 #[cfg(target_os = "windows")]
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 // ─── WireGuard Config Parser ──────────────────────────────────────────────────
@@ -54,14 +54,20 @@ pub fn parse_wg_config(raw: &str) -> Result<WgConfig, String> {
         }
         if let Some((k, v)) = line.split_once('=') {
             match section {
-                "Interface" => { map.insert(k.trim(), v.trim()); }
-                "Peer" => { peer_map.insert(k.trim(), v.trim()); }
+                "Interface" => {
+                    map.insert(k.trim(), v.trim());
+                }
+                "Peer" => {
+                    peer_map.insert(k.trim(), v.trim());
+                }
                 _ => {}
             }
         }
     }
 
-    let private_key_b64 = map.get("PrivateKey").ok_or("Missing [Interface] PrivateKey")?;
+    let private_key_b64 = map
+        .get("PrivateKey")
+        .ok_or("Missing [Interface] PrivateKey")?;
     let private_key_bytes: [u8; 32] = BASE64
         .decode(private_key_b64)
         .map_err(|e| format!("Invalid PrivateKey base64: {e}"))?
@@ -81,7 +87,9 @@ pub fn parse_wg_config(raw: &str) -> Result<WgConfig, String> {
         .and_then(|s| s.split(',').next())
         .and_then(|s| s.trim().parse::<IpAddr>().ok());
 
-    let peer_pub_b64 = peer_map.get("PublicKey").ok_or("Missing [Peer] PublicKey")?;
+    let peer_pub_b64 = peer_map
+        .get("PublicKey")
+        .ok_or("Missing [Peer] PublicKey")?;
     let peer_pub_bytes: [u8; 32] = BASE64
         .decode(peer_pub_b64)
         .map_err(|e| format!("Invalid peer PublicKey base64: {e}"))?
@@ -182,9 +190,18 @@ pub struct VpnStatus {
 pub async fn get_vpn_status(state: tauri::State<'_, VpnState>) -> Result<VpnStatus, String> {
     let tunnel = state.tunnel.lock().await;
     Ok(match &*tunnel {
-        None => VpnStatus { status: "disconnected".into(), protocol: "none".into() },
-        Some(ActiveTunnel::WireGuard(_)) => VpnStatus { status: "connected".into(), protocol: "wireguard".into() },
-        Some(ActiveTunnel::OpenConnect(_)) => VpnStatus { status: "connected".into(), protocol: "openconnect".into() },
+        None => VpnStatus {
+            status: "disconnected".into(),
+            protocol: "none".into(),
+        },
+        Some(ActiveTunnel::WireGuard(_)) => VpnStatus {
+            status: "connected".into(),
+            protocol: "wireguard".into(),
+        },
+        Some(ActiveTunnel::OpenConnect(_)) => VpnStatus {
+            status: "connected".into(),
+            protocol: "openconnect".into(),
+        },
     })
 }
 
@@ -256,14 +273,16 @@ pub async fn start_vpn_tunnel(
         }
         let route_cmd = format!(
             "netsh interface ip add route {}/{} \"AirlockVPN\"",
-            net.ip(), net.prefix()
+            net.ip(),
+            net.prefix()
         );
         let _ = run_netsh(&route_cmd);
     }
 
     if let Some(dns_ip) = cfg.dns {
         let _ = run_netsh(&format!(
-            "netsh interface ip set dns name=\"AirlockVPN\" static {}", dns_ip
+            "netsh interface ip set dns name=\"AirlockVPN\" static {}",
+            dns_ip
         ));
     }
 
@@ -279,8 +298,8 @@ pub async fn start_vpn_tunnel(
     let tunn = Arc::new(std::sync::Mutex::new(tunn));
 
     // ── 5. UDP socket ─────────────────────────────────────────────────────────
-    let udp = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| format!("Failed to bind UDP socket: {e}"))?;
+    let udp =
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind UDP socket: {e}"))?;
     udp.connect(cfg.peer_endpoint)
         .map_err(|e| format!("Failed to connect UDP to peer: {e}"))?;
     udp.set_read_timeout(Some(Duration::from_millis(100)))
@@ -311,12 +330,19 @@ pub async fn start_vpn_tunnel(
                         t.encapsulate(pkt.bytes(), &mut scratch)
                     };
                     match result {
-                        TunnResult::WriteToNetwork(data) => { let _ = udp_out.send(data); }
-                        TunnResult::Err(e) => { log::warn!("VPN encapsulate error: {:?}", e); }
+                        TunnResult::WriteToNetwork(data) => {
+                            let _ = udp_out.send(data);
+                        }
+                        TunnResult::Err(e) => {
+                            log::warn!("VPN encapsulate error: {:?}", e);
+                        }
                         _ => {}
                     }
                 }
-                Err(e) => { log::warn!("Wintun receive error: {}", e); break; }
+                Err(e) => {
+                    log::warn!("Wintun receive error: {}", e);
+                    break;
+                }
             }
         }
     });
@@ -330,18 +356,22 @@ pub async fn start_vpn_tunnel(
         loop {
             match udp_in.recv(&mut buf) {
                 Ok(n) => {
-                    let process = |result: TunnResult<'_>| {
-                        match result {
-                            TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                                if let Ok(mut pkt) = session_in.allocate_send_packet(data.len() as u16) {
-                                    pkt.bytes_mut().copy_from_slice(data);
-                                    session_in.send_packet(pkt);
-                                }
+                    let process = |result: TunnResult<'_>| match result {
+                        TunnResult::WriteToTunnelV4(data, _)
+                        | TunnResult::WriteToTunnelV6(data, _) => {
+                            if let Ok(mut pkt) = session_in.allocate_send_packet(data.len() as u16)
+                            {
+                                pkt.bytes_mut().copy_from_slice(data);
+                                session_in.send_packet(pkt);
                             }
-                            TunnResult::WriteToNetwork(data) => { let _ = udp_in.send(data); }
-                            TunnResult::Err(e) => { log::warn!("VPN decapsulate error: {:?}", e); }
-                            _ => {}
                         }
+                        TunnResult::WriteToNetwork(data) => {
+                            let _ = udp_in.send(data);
+                        }
+                        TunnResult::Err(e) => {
+                            log::warn!("VPN decapsulate error: {:?}", e);
+                        }
+                        _ => {}
                     };
 
                     {
@@ -355,11 +385,14 @@ pub async fn start_vpn_tunnel(
                         let result = t.decapsulate(None, &[], &mut scratch);
                         let done = matches!(result, TunnResult::Done);
                         process(result);
-                        if done { break; }
+                        if done {
+                            break;
+                        }
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
                     let mut t = tunn_in.lock().unwrap();
                     let result = t.update_timers(&mut keepalive_scratch);
@@ -368,7 +401,10 @@ pub async fn start_vpn_tunnel(
                         let _ = udp_in.send(data);
                     }
                 }
-                Err(e) => { log::warn!("VPN UDP recv error: {}", e); break; }
+                Err(e) => {
+                    log::warn!("VPN UDP recv error: {}", e);
+                    break;
+                }
             }
         }
     });
@@ -386,10 +422,13 @@ pub async fn start_vpn_tunnel(
         }));
     }
 
-    let _ = app.emit("vpn-status-changed", VpnStatus {
-        status: "connected".into(),
-        protocol: "wireguard".into(),
-    });
+    let _ = app.emit(
+        "vpn-status-changed",
+        VpnStatus {
+            status: "connected".into(),
+            protocol: "wireguard".into(),
+        },
+    );
     log::info!("WireGuard tunnel started successfully");
     Ok(())
 }
@@ -412,7 +451,7 @@ pub async fn start_openconnect_tunnel(
     state: tauri::State<'_, VpnState>,
     server: String,
     port: Option<u16>,
-    servercert: Option<String>,  // pin-sha256:XXXX stored after user trusts the cert
+    servercert: Option<String>, // pin-sha256:XXXX stored after user trusts the cert
     username: String,
     password: String,
     protocol_hint: String,
@@ -427,7 +466,9 @@ pub async fn start_openconnect_tunnel(
     }
 
     if server.trim().is_empty() {
-        return Err("Server URL cannot be empty. Please set a server address in the VPN profile.".into());
+        return Err(
+            "Server URL cannot be empty. Please set a server address in the VPN profile.".into(),
+        );
     }
 
     // ── 2. Locate openconnect.exe next to the binary ──────────────────────────
@@ -462,12 +503,19 @@ pub async fn start_openconnect_tunnel(
 
     // Trust a specific server certificate fingerprint (stored after user confirms)
     if let Some(ref cert) = servercert {
-        let pin = if cert.starts_with("pin-sha256:") { cert.clone() }
-                  else { format!("pin-sha256:{}", cert) };
+        let pin = if cert.starts_with("pin-sha256:") {
+            cert.clone()
+        } else {
+            format!("pin-sha256:{}", cert)
+        };
         args.push(format!("--servercert={}", pin));
     }
 
-    log::info!("[openconnect] Launching: {} {}", oc_path.display(), args.join(" "));
+    log::info!(
+        "[openconnect] Launching: {} {}",
+        oc_path.display(),
+        args.join(" ")
+    );
 
     // Map protocol hint to openconnect flag
     let protocol_flag = match protocol_hint.as_str() {
@@ -502,24 +550,34 @@ pub async fn start_openconnect_tunnel(
         .env_remove("SSL_CERT_FILE")
         .env_remove("OPENSSL_DIR")
         // Ensure exe directory is first in PATH so bundled DLLs are found
-        .env("PATH", format!("{};{}", exe_dir.display(),
-            std::env::var("PATH").unwrap_or_default()));
+        .env(
+            "PATH",
+            format!(
+                "{};{}",
+                exe_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
 
-    let mut child = cmd.spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                "Administrator privileges required to run openconnect.\n\n\
-                 Please restart Airlock as Administrator.".into()
-            } else {
-                format!("Failed to launch openconnect.exe: {e}")
-            }
-        })?;
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            "Administrator privileges required to run openconnect.\n\n\
+                 Please restart Airlock as Administrator."
+                .into()
+        } else {
+            format!("Failed to launch openconnect.exe: {e}")
+        }
+    })?;
 
     // ── 4. Write password to stdin immediately ────────────────────────────────
-    let mut stdin = child.stdin.take()
+    let mut stdin = child
+        .stdin
+        .take()
         .ok_or("Failed to open openconnect stdin")?;
     let pass_line = format!("{}\n", password);
-    stdin.write_all(pass_line.as_bytes()).await
+    stdin
+        .write_all(pass_line.as_bytes())
+        .await
         .map_err(|e| format!("Failed to write password to openconnect: {e}"))?;
 
     // Keep stdin alive — we'll need it for 2FA token input
@@ -533,13 +591,21 @@ pub async fn start_openconnect_tunnel(
     tokio::spawn(async move {
         while let Some(token) = mfa_rx.recv().await {
             let mut stdin_guard = stdin_mfa.lock().await;
-            let _ = stdin_guard.write_all(format!("{}\n", token).as_bytes()).await;
+            let _ = stdin_guard
+                .write_all(format!("{}\n", token).as_bytes())
+                .await;
         }
     });
 
     // ── 7. Stdout/stderr monitor task ─────────────────────────────────────────
-    let stdout = child.stdout.take().ok_or("Failed to open openconnect stdout")?;
-    let stderr = child.stderr.take().ok_or("Failed to open openconnect stderr")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Failed to open openconnect stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Failed to open openconnect stderr")?;
     let server_for_cert = server_arg.clone();
 
     let app_stdout = app.clone();
@@ -562,40 +628,58 @@ pub async fn start_openconnect_tunnel(
                 || lower.contains("vpn session established")
                 || lower.contains("connected as ")
             {
-                let _ = app_stdout.emit("vpn-status-changed", VpnStatus {
-                    status: "connected".into(),
-                    protocol: "openconnect".into(),
-                });
+                let _ = app_stdout.emit(
+                    "vpn-status-changed",
+                    VpnStatus {
+                        status: "connected".into(),
+                        protocol: "openconnect".into(),
+                    },
+                );
                 log::info!("OpenConnect tunnel established");
             }
             // MFA / 2FA prompt detected — be specific to avoid false-positives on HTTP logs
             // Real prompts contain "please enter", "enter your", or challenge keywords.
             // Exclude lines that start with a timestamp or contain "http response".
-            else if !lower.contains("http response") && !lower.contains("http/1") && !lower.contains("password") && !lower.contains("username") && (
-                lower.contains("passcode:")
-                || lower.contains("challenge:")
-                || lower.contains("otp:")
-                || (lower.contains("token") && lower.contains("enter"))
-            ) {
+            else if !lower.contains("http response")
+                && !lower.contains("http/1")
+                && !lower.contains("password")
+                && !lower.contains("username")
+                && (lower.contains("passcode:")
+                    || lower.contains("challenge:")
+                    || lower.contains("otp:")
+                    || (lower.contains("token") && lower.contains("enter")))
+            {
                 log::info!("OpenConnect MFA prompt detected: {}", line.trim());
-                let _ = app_stdout.emit("vpn-mfa-required", serde_json::json!({
-                    "prompt": line.trim()
-                }));
+                let _ = app_stdout.emit(
+                    "vpn-mfa-required",
+                    serde_json::json!({
+                        "prompt": line.trim()
+                    }),
+                );
             }
             // Disconnected
             else if lower.contains("disconnected") || lower.contains("session terminated") {
-                let _ = app_stdout.emit("vpn-status-changed", VpnStatus {
-                    status: "disconnected".into(),
-                    protocol: "none".into(),
-                });
+                let _ = app_stdout.emit(
+                    "vpn-status-changed",
+                    VpnStatus {
+                        status: "disconnected".into(),
+                        protocol: "none".into(),
+                    },
+                );
             }
             // Error
-            else if lower.contains("failed to") || lower.contains("error:") || lower.contains("authentication failed") {
-                let _ = app_stdout.emit("vpn-status-changed", serde_json::json!({
-                    "status": "error",
-                    "protocol": "openconnect",
-                    "message": line.trim()
-                }));
+            else if lower.contains("failed to")
+                || lower.contains("error:")
+                || lower.contains("authentication failed")
+            {
+                let _ = app_stdout.emit(
+                    "vpn-status-changed",
+                    serde_json::json!({
+                        "status": "error",
+                        "protocol": "openconnect",
+                        "message": line.trim()
+                    }),
+                );
             }
         }
         // stdout pipe closed — the process has exited
@@ -605,10 +689,13 @@ pub async fn start_openconnect_tunnel(
             let mut tunnel = tunnel_arc_cleanup.lock().await;
             *tunnel = None;
         }
-        let _ = app_exit_cleanup.emit("vpn-status-changed", serde_json::json!({
-            "status": "disconnected",
-            "protocol": "none",
-        }));
+        let _ = app_exit_cleanup.emit(
+            "vpn-status-changed",
+            serde_json::json!({
+                "status": "disconnected",
+                "protocol": "none",
+            }),
+        );
         log::info!("[openconnect] Process exited — tunnel state cleared");
     });
 
@@ -626,38 +713,57 @@ pub async fn start_openconnect_tunnel(
                 || lower.contains("vpn session established")
                 || lower.contains("connected as ")
             {
-                let _ = app_stderr.emit("vpn-status-changed", VpnStatus {
-                    status: "connected".into(),
-                    protocol: "openconnect".into(),
-                });
-            } else if !lower.contains("http response") && !lower.contains("http/1") && !lower.contains("password") && !lower.contains("username") && (
-                lower.contains("passcode:")
-                || lower.contains("challenge:")
-                || lower.contains("otp:")
-                || (lower.contains("response:") && lower.trim_start().starts_with("response:"))
-            ) {
-                let _ = app_stderr.emit("vpn-mfa-required", serde_json::json!({
-                    "prompt": line.trim()
-                }));
-            } else if lower.contains("certificate verify failed") || lower.contains("failed verification") {
+                let _ = app_stderr.emit(
+                    "vpn-status-changed",
+                    VpnStatus {
+                        status: "connected".into(),
+                        protocol: "openconnect".into(),
+                    },
+                );
+            } else if !lower.contains("http response")
+                && !lower.contains("http/1")
+                && !lower.contains("password")
+                && !lower.contains("username")
+                && (lower.contains("passcode:")
+                    || lower.contains("challenge:")
+                    || lower.contains("otp:")
+                    || (lower.contains("response:") && lower.trim_start().starts_with("response:")))
+            {
+                let _ = app_stderr.emit(
+                    "vpn-mfa-required",
+                    serde_json::json!({
+                        "prompt": line.trim()
+                    }),
+                );
+            } else if lower.contains("certificate verify failed")
+                || lower.contains("failed verification")
+            {
                 // Next line(s) will contain the --servercert hint
-                log::warn!("[openconnect] Certificate verification failed, watching for fingerprint...");
+                log::warn!(
+                    "[openconnect] Certificate verification failed, watching for fingerprint..."
+                );
             } else if lower.contains("pin-sha256:") {
                 // Extract the fingerprint from openconnect's suggestion
                 if let Some(start) = line.find("pin-sha256:") {
                     let fingerprint = line[start..].trim().to_string();
                     log::warn!("[openconnect] Cert fingerprint detected: {}", fingerprint);
-                    let _ = app_stderr.emit("vpn-cert-verify", serde_json::json!({
-                        "fingerprint": fingerprint,
-                        "server": server_for_cert.clone(),
-                    }));
+                    let _ = app_stderr.emit(
+                        "vpn-cert-verify",
+                        serde_json::json!({
+                            "fingerprint": fingerprint,
+                            "server": server_for_cert.clone(),
+                        }),
+                    );
                 }
             } else if lower.contains("authentication failed") {
-                let _ = app_stderr.emit("vpn-status-changed", serde_json::json!({
-                    "status": "error",
-                    "protocol": "openconnect",
-                    "message": "Authentication failed — check username and password."
-                }));
+                let _ = app_stderr.emit(
+                    "vpn-status-changed",
+                    serde_json::json!({
+                        "status": "error",
+                        "protocol": "openconnect",
+                        "message": "Authentication failed — check username and password."
+                    }),
+                );
             }
         }
     });
@@ -673,10 +779,13 @@ pub async fn start_openconnect_tunnel(
     }
 
     // Emit "connecting" immediately — connected event comes from stdout monitor
-    let _ = app.emit("vpn-status-changed", VpnStatus {
-        status: "connecting".into(),
-        protocol: "openconnect".into(),
-    });
+    let _ = app.emit(
+        "vpn-status-changed",
+        VpnStatus {
+            status: "connecting".into(),
+            protocol: "openconnect".into(),
+        },
+    );
     log::info!("OpenConnect process spawned, waiting for connection...");
     Ok(())
 }
@@ -689,10 +798,11 @@ pub async fn send_mfa_token(
 ) -> Result<(), String> {
     let tunnel = state.tunnel.lock().await;
     match &*tunnel {
-        Some(ActiveTunnel::OpenConnect(handle)) => {
-            handle.mfa_tx.send(token).await
-                .map_err(|_| "Failed to send MFA token — tunnel may have closed".into())
-        }
+        Some(ActiveTunnel::OpenConnect(handle)) => handle
+            .mfa_tx
+            .send(token)
+            .await
+            .map_err(|_| "Failed to send MFA token — tunnel may have closed".into()),
         _ => Err("No active OpenConnect tunnel".into()),
     }
 }
@@ -714,13 +824,18 @@ pub async fn stop_vpn_tunnel(
         Some(ActiveTunnel::WireGuard(handle)) => {
             handle.outbound_task.abort();
             handle.inbound_task.abort();
-            if let Some(k) = handle.keepalive_task { k.abort(); }
+            if let Some(k) = handle.keepalive_task {
+                k.abort();
+            }
 
             for net in &handle.allowed_ips {
-                if net.ip().to_string() == "0.0.0.0" { continue; }
+                if net.ip().to_string() == "0.0.0.0" {
+                    continue;
+                }
                 let _ = run_netsh(&format!(
                     "netsh interface ip delete route {}/{} \"AirlockVPN\"",
-                    net.ip(), net.prefix()
+                    net.ip(),
+                    net.prefix()
                 ));
             }
             drop(handle._adapter);
@@ -741,10 +856,13 @@ pub async fn stop_vpn_tunnel(
         }
     }
 
-    let _ = app.emit("vpn-status-changed", VpnStatus {
-        status: "disconnected".into(),
-        protocol: "none".into(),
-    });
+    let _ = app.emit(
+        "vpn-status-changed",
+        VpnStatus {
+            status: "disconnected".into(),
+            protocol: "none".into(),
+        },
+    );
     Ok(())
 }
 
