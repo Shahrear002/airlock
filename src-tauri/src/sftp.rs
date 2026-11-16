@@ -29,7 +29,7 @@ pub struct FileEntry {
 /// via the system default handler. Non-allowlisted extensions (executables, scripts,
 /// batch files) must never be launched via shell associations.
 pub const SAFE_TEXT_EXTENSIONS: &[&str] = &[
-    "txt", "md", "markdown", "json", "json5", "yml", "yaml", "xml", "toml",
+    "txt", "md", "markdown", "json", "json5", "yml", "yaml", "toml",
     "ini", "conf", "cfg", "log", "env", "diff", "patch",
     "rs", "go", "c", "cpp", "cc", "cxx", "h", "hpp", "java", "kt",
     "ts", "jsx", "tsx", "vue", "svelte",
@@ -51,6 +51,68 @@ pub const SAFE_EXACT_FILENAMES: &[&str] = &[
     ".zshrc",
     ".profile",
 ];
+
+/// Target operating system for editor dispatching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetOs {
+    Windows,
+    Macos,
+    Linux,
+    Other,
+}
+
+/// Strategy for opening a file in an editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenMethod {
+    ConfiguredEditor,
+    SystemDefault,
+    WindowsNotepad,
+    MacosOpenText,
+    LinuxXdgOpen,
+}
+
+/// Pure decision function determining how a file should be opened based on OS, filename, and editor configuration.
+pub fn choose_open_method(
+    os: TargetOs,
+    file_name: &str,
+    has_editor: bool,
+) -> Result<OpenMethod, String> {
+    if has_editor {
+        return Ok(OpenMethod::ConfiguredEditor);
+    }
+
+    let is_safe = is_safe_file_for_open(file_name);
+    match os {
+        TargetOs::Windows => {
+            if is_safe {
+                Ok(OpenMethod::SystemDefault)
+            } else {
+                Ok(OpenMethod::WindowsNotepad)
+            }
+        }
+        TargetOs::Macos => Ok(OpenMethod::MacosOpenText),
+        TargetOs::Linux => {
+            if is_safe {
+                Ok(OpenMethod::LinuxXdgOpen)
+            } else {
+                Err(format!(
+                    "File '{}' is not in the safe text allowlist. Please configure an external editor in Settings.",
+                    file_name
+                ))
+            }
+        }
+        TargetOs::Other => {
+            if is_safe {
+                Ok(OpenMethod::SystemDefault)
+            } else {
+                Err(format!(
+                    "File '{}' is not in the safe text allowlist. Please configure an external editor in Settings.",
+                    file_name
+                ))
+            }
+        }
+    }
+}
 
 /// Check if a given file extension is in the safe text allowlist.
 pub fn is_safe_text_extension(ext: &str) -> bool {
@@ -828,78 +890,60 @@ pub async fn edit_remote_file(
     drop(file);
 
     // 5. SEC-04: Safe Editor Execution
-    // Check safe allowlist vs explicit custom editor vs safe fallback
-    let is_safe = is_safe_file_for_open(&file_name);
     let custom_editor = editor.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
-
-    if let Some(cmd_str) = custom_editor {
-        // User configured an explicit external editor command (e.g. "code", "subl", "notepad.exe", "gedit")
-        let mut parts = cmd_str.split_whitespace();
-        let program = parts.next().ok_or_else(|| "Invalid editor command".to_string())?;
-        let mut cmd = std::process::Command::new(program);
-        for arg in parts {
-            cmd.arg(arg);
-        }
-        cmd.arg(&temp_path);
-        cmd.spawn().map_err(|e| format!("Failed to launch configured editor '{}': {}", cmd_str, e))?;
+    let current_os = if cfg!(target_os = "windows") {
+        TargetOs::Windows
+    } else if cfg!(target_os = "macos") {
+        TargetOs::Macos
+    } else if cfg!(target_os = "linux") {
+        TargetOs::Linux
     } else {
-        #[cfg(target_os = "windows")]
-        {
-            if is_safe {
-                // Allowlisted files on Windows still use open::that
-                open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
-            } else {
-                log::info!(
-                    "Non-allowlisted file '{}' opened safely with explicit notepad.exe",
-                    file_name
-                );
-                let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-                let mut notepad_path = PathBuf::from(&system_root).join("System32").join("notepad.exe");
-                if !notepad_path.exists() {
-                    notepad_path = PathBuf::from("C:\\Windows\\System32\\notepad.exe");
-                    if !notepad_path.exists() {
-                        notepad_path = PathBuf::from("C:\\Windows\\notepad.exe");
-                    }
-                }
-                let mut cmd = std::process::Command::new(&notepad_path);
-                cmd.arg(&temp_path);
-                cmd.spawn().map_err(|e| format!("Failed to open in Notepad ('{}'): {}", notepad_path.display(), e))?;
-            }
-        }
+        TargetOs::Other
+    };
 
-        #[cfg(target_os = "macos")]
-        {
-            // macOS open -t <file>
+    let method = choose_open_method(current_os, &file_name, custom_editor.is_some())?;
+
+    match method {
+        OpenMethod::ConfiguredEditor => {
+            let cmd_str = custom_editor.unwrap();
+            let mut parts = cmd_str.split_whitespace();
+            let program = parts.next().ok_or_else(|| "Invalid editor command".to_string())?;
+            let mut cmd = std::process::Command::new(program);
+            for arg in parts {
+                cmd.arg(arg);
+            }
+            cmd.arg(&temp_path);
+            cmd.spawn().map_err(|e| format!("Failed to launch configured editor '{}': {}", cmd_str, e))?;
+        }
+        OpenMethod::SystemDefault => {
+            open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
+        }
+        OpenMethod::WindowsNotepad => {
+            log::info!(
+                "Non-allowlisted file '{}' opened safely with explicit notepad.exe",
+                file_name
+            );
+            let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let mut notepad_path = PathBuf::from(&system_root).join("System32").join("notepad.exe");
+            if !notepad_path.exists() {
+                notepad_path = PathBuf::from("C:\\Windows\\System32\\notepad.exe");
+                if !notepad_path.exists() {
+                    notepad_path = PathBuf::from("C:\\Windows\\notepad.exe");
+                }
+            }
+            let mut cmd = std::process::Command::new(&notepad_path);
+            cmd.arg(&temp_path);
+            cmd.spawn().map_err(|e| format!("Failed to open in Notepad ('{}'): {}", notepad_path.display(), e))?;
+        }
+        OpenMethod::MacosOpenText => {
             let mut cmd = std::process::Command::new("open");
             cmd.arg("-t").arg(&temp_path);
             cmd.spawn().map_err(|e| format!("Failed to open default editor via open -t: {}", e))?;
         }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Linux xdg-open for allowlisted files only, otherwise return an error telling the user to configure an editor in Settings
-            if is_safe {
-                let mut cmd = std::process::Command::new("xdg-open");
-                cmd.arg(&temp_path);
-                cmd.spawn().map_err(|e| format!("Failed to open file via xdg-open: {}", e))?;
-            } else {
-                return Err(format!(
-                    "File '{}' is not in the safe text allowlist. Please configure an external editor in Settings.",
-                    file_name
-                ));
-            }
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        {
-            if is_safe {
-                open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
-            } else {
-                return Err(format!(
-                    "File '{}' is not in the safe text allowlist. Please configure an external editor in Settings.",
-                    file_name
-                ));
-            }
+        OpenMethod::LinuxXdgOpen => {
+            let mut cmd = std::process::Command::new("xdg-open");
+            cmd.arg(&temp_path);
+            cmd.spawn().map_err(|e| format!("Failed to open file via xdg-open: {}", e))?;
         }
     }
 
@@ -1147,10 +1191,10 @@ mod tests {
         assert!(is_safe_text_extension("md"));
         assert!(is_safe_text_extension("yaml"));
 
-        // Script, executable, and spreadsheet extensions must be rejected (case-insensitive)
+        // Script, executable, spreadsheet, and xml extensions must be rejected (case-insensitive)
         for ext in &[
             "js", "py", "sh", "bash", "html", "htm", "csv", "tsv", "mjs", "cjs", "JS", "Py",
-            "bat", "cmd", "exe", "vbs", "ps1", "hta", "lnk", ""
+            "xml", "bat", "cmd", "exe", "vbs", "ps1", "hta", "lnk", ""
         ] {
             assert!(!is_safe_text_extension(ext), "Extension {:?} should be rejected", ext);
         }
@@ -1158,24 +1202,85 @@ mod tests {
 
     #[test]
     fn test_safe_file_for_open() {
-        // Assert js, py, sh, bash, html, htm, csv, tsv, mjs, cjs, JS, Py are rejected
-        for risky in &[
-            "js", "py", "sh", "bash", "html", "htm", "csv", "tsv", "mjs", "cjs", "JS", "Py"
-        ] {
-            assert!(!is_safe_file_for_open(risky), "Target {:?} should be rejected", risky);
-        }
-
-        // Assert run.bat., run.js (trailing space), a.txt.js, .js are rejected
-        assert!(!is_safe_file_for_open("run.bat."));
-        assert!(!is_safe_file_for_open("run.js "));
+        // Assert real names are rejected
+        assert!(!is_safe_file_for_open("x.js"));
+        assert!(!is_safe_file_for_open("x.PY"));
+        assert!(!is_safe_file_for_open("page.html"));
+        assert!(!is_safe_file_for_open("data.csv"));
+        assert!(!is_safe_file_for_open("run.sh"));
+        assert!(!is_safe_file_for_open("notes.txt ")); // trailing space rejected
+        assert!(!is_safe_file_for_open("run.bat."));  // trailing dot rejected
+        assert!(!is_safe_file_for_open("run.js "));   // trailing space rejected
         assert!(!is_safe_file_for_open("a.txt.js"));
         assert!(!is_safe_file_for_open(".js"));
+        assert!(!is_safe_file_for_open("data.tsv"));
+        assert!(!is_safe_file_for_open("file.xml"));
 
-        // Assert Dockerfile, .bashrc, Makefile, notes.TXT are accepted
+        // Assert real names are accepted
+        assert!(is_safe_file_for_open("notes.txt"));
+        assert!(is_safe_file_for_open("a b.txt")); // space in filename accepted
+        assert!(is_safe_file_for_open("notes.TXT"));
         assert!(is_safe_file_for_open("Dockerfile"));
         assert!(is_safe_file_for_open(".bashrc"));
         assert!(is_safe_file_for_open("Makefile"));
-        assert!(is_safe_file_for_open("notes.TXT"));
+    }
+
+    #[test]
+    fn test_choose_open_method_matrix() {
+        // 1. With configured editor (has_editor = true) -> always OpenMethod::ConfiguredEditor across all OSes
+        for os in &[TargetOs::Windows, TargetOs::Macos, TargetOs::Linux, TargetOs::Other] {
+            for file in &["notes.txt", "x.js", "page.html", "run.bat.", "notes.txt ", "Dockerfile"] {
+                assert_eq!(
+                    choose_open_method(*os, file, true),
+                    Ok(OpenMethod::ConfiguredEditor),
+                    "OS {:?} with file {:?} and has_editor=true must return ConfiguredEditor",
+                    os, file
+                );
+            }
+        }
+
+        // 2. Without editor (has_editor = false)
+        // Windows:
+        // Allowlisted files -> SystemDefault
+        assert_eq!(choose_open_method(TargetOs::Windows, "notes.txt", false), Ok(OpenMethod::SystemDefault));
+        assert_eq!(choose_open_method(TargetOs::Windows, "a b.txt", false), Ok(OpenMethod::SystemDefault));
+        assert_eq!(choose_open_method(TargetOs::Windows, "Dockerfile", false), Ok(OpenMethod::SystemDefault));
+        // Non-allowlisted files -> WindowsNotepad
+        assert_eq!(choose_open_method(TargetOs::Windows, "x.js", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(choose_open_method(TargetOs::Windows, "x.PY", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(choose_open_method(TargetOs::Windows, "page.html", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(choose_open_method(TargetOs::Windows, "data.csv", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(choose_open_method(TargetOs::Windows, "run.sh", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(choose_open_method(TargetOs::Windows, "notes.txt ", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(choose_open_method(TargetOs::Windows, "run.bat.", false), Ok(OpenMethod::WindowsNotepad));
+        assert_eq!(choose_open_method(TargetOs::Windows, "file.xml", false), Ok(OpenMethod::WindowsNotepad));
+
+        // macOS:
+        // Always MacosOpenText regardless of file type when no editor configured
+        assert_eq!(choose_open_method(TargetOs::Macos, "notes.txt", false), Ok(OpenMethod::MacosOpenText));
+        assert_eq!(choose_open_method(TargetOs::Macos, "x.js", false), Ok(OpenMethod::MacosOpenText));
+        assert_eq!(choose_open_method(TargetOs::Macos, "page.html", false), Ok(OpenMethod::MacosOpenText));
+        assert_eq!(choose_open_method(TargetOs::Macos, "Dockerfile", false), Ok(OpenMethod::MacosOpenText));
+        assert_eq!(choose_open_method(TargetOs::Macos, "notes.txt ", false), Ok(OpenMethod::MacosOpenText));
+
+        // Linux:
+        // Allowlisted files -> LinuxXdgOpen
+        assert_eq!(choose_open_method(TargetOs::Linux, "notes.txt", false), Ok(OpenMethod::LinuxXdgOpen));
+        assert_eq!(choose_open_method(TargetOs::Linux, "a b.txt", false), Ok(OpenMethod::LinuxXdgOpen));
+        assert_eq!(choose_open_method(TargetOs::Linux, "Dockerfile", false), Ok(OpenMethod::LinuxXdgOpen));
+        // Non-allowlisted files -> Err
+        assert!(choose_open_method(TargetOs::Linux, "x.js", false).is_err());
+        assert!(choose_open_method(TargetOs::Linux, "x.PY", false).is_err());
+        assert!(choose_open_method(TargetOs::Linux, "page.html", false).is_err());
+        assert!(choose_open_method(TargetOs::Linux, "data.csv", false).is_err());
+        assert!(choose_open_method(TargetOs::Linux, "run.sh", false).is_err());
+        assert!(choose_open_method(TargetOs::Linux, "notes.txt ", false).is_err());
+        assert!(choose_open_method(TargetOs::Linux, "run.bat.", false).is_err());
+        assert!(choose_open_method(TargetOs::Linux, "file.xml", false).is_err());
+
+        // Other:
+        assert_eq!(choose_open_method(TargetOs::Other, "notes.txt", false), Ok(OpenMethod::SystemDefault));
+        assert!(choose_open_method(TargetOs::Other, "x.js", false).is_err());
     }
 
     #[test]
