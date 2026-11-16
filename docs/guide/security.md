@@ -48,7 +48,7 @@ Airlock enforces strict isolation and sanitization guarantees across all SFTP op
    - Symlinks are detected via `symlink_metadata` and skipped during recursive transfers to prevent arbitrary local directory exfiltration.
 
 2. **Sandboxed Local File Editing:**
-   - **Safe Extension Allowlist:** Only verified text and source-code formats (`.txt`, `.md`, `.json`, `.rs`, `.py`, `.ts`, `.html`, etc.) may open via the default system handler.
+   - **Safe Extension Allowlist:** Only verified text and configuration formats (`.txt`, `.md`, `.json`, `.yaml`, `.toml`, `.rs`, `.ts`, etc., and exact filenames like `Dockerfile`, `Makefile`) may open via the default system handler. Executable scripts (`.py`, `.js`, `.sh`, `.html`) and spreadsheet files (`.csv`, `.tsv`) are strictly excluded from default opening.
    - **Execution Shielding:** Executable binaries, scripts, and batch files (`.bat`, `.cmd`, `.vbs`, `.ps1`, `.exe`, `.hta`) are strictly prohibited from invoking shell associations (`open::that`). On Windows, these files fall back safely to opening directly as text inside `notepad.exe`.
    - **Custom External Editor:** You can configure a preferred text editor (e.g. `code`, `subl`, `notepad.exe`, `gedit`) under **Settings & Security > Editor & SFTP**. Configured editors are invoked directly with the file path without shell interpolation.
    - **Safe Temp Lifecycle & Leak Prevention:** Edited files are stored in a restricted temporary folder (`airlock_edits`). File watchers monitor session liveness and automatically delete temporary files upon session termination or application exit. Any orphaned files from previous crashes are purged on startup.

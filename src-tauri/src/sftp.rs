@@ -30,16 +30,92 @@ pub struct FileEntry {
 /// batch files) must never be launched via shell associations.
 pub const SAFE_TEXT_EXTENSIONS: &[&str] = &[
     "txt", "md", "markdown", "json", "json5", "yml", "yaml", "xml", "toml",
-    "ini", "conf", "cfg", "log", "env", "csv", "tsv", "diff", "patch",
-    "rs", "go", "py", "c", "cpp", "cc", "cxx", "h", "hpp", "java", "kt",
-    "ts", "js", "mjs", "cjs", "jsx", "tsx", "vue", "svelte", "html", "htm",
-    "css", "scss", "sass", "less", "sql", "sh", "bash", "zsh", "fish"
+    "ini", "conf", "cfg", "log", "env", "diff", "patch",
+    "rs", "go", "c", "cpp", "cc", "cxx", "h", "hpp", "java", "kt",
+    "ts", "jsx", "tsx", "vue", "svelte",
+    "css", "scss", "sass", "less", "sql"
+];
+
+/// Strict allowlist of exact filenames that can be opened via the system default handler.
+pub const SAFE_EXACT_FILENAMES: &[&str] = &[
+    "Dockerfile",
+    "Makefile",
+    "Containerfile",
+    "Vagrantfile",
+    "Procfile",
+    "Gemfile",
+    "Rakefile",
+    ".gitignore",
+    ".env",
+    ".bashrc",
+    ".zshrc",
+    ".profile",
 ];
 
 /// Check if a given file extension is in the safe text allowlist.
 pub fn is_safe_text_extension(ext: &str) -> bool {
-    let clean = ext.trim().trim_start_matches('.').to_ascii_lowercase();
-    SAFE_TEXT_EXTENSIONS.contains(&clean.as_str())
+    let clean = ext.trim_start_matches('.');
+    if clean.is_empty()
+        || clean.ends_with(' ')
+        || clean.ends_with('.')
+        || clean.starts_with(' ')
+        || clean.contains('/')
+        || clean.contains('\\')
+    {
+        return false;
+    }
+    let lower = clean.to_ascii_lowercase();
+    SAFE_TEXT_EXTENSIONS.contains(&lower.as_str())
+}
+
+/// Check if a filename or path is safe to open with the system's default text handler.
+pub fn is_safe_file_for_open(name: &str) -> bool {
+    let file_name = name
+        .rsplit('/')
+        .next()
+        .unwrap_or(name)
+        .rsplit('\\')
+        .next()
+        .unwrap_or(name);
+
+    if file_name.is_empty() {
+        return false;
+    }
+
+    // 1. Exact safe filenames (e.g. Dockerfile, Makefile, .bashrc)
+    if SAFE_EXACT_FILENAMES.contains(&file_name) {
+        return true;
+    }
+
+    // 2. Reject trailing dot or trailing space in the filename
+    if file_name.ends_with('.') || file_name.ends_with(' ') {
+        return false;
+    }
+
+    // 3. Dotfiles like ".js" (starts with '.' and has no secondary extension)
+    if file_name.starts_with('.') {
+        let after_dot = &file_name[1..];
+        if let Some((_substem, ext)) = after_dot.rsplit_once('.') {
+            if ext.is_empty() || ext.ends_with(' ') || ext.ends_with('.') {
+                return false;
+            }
+            return is_safe_text_extension(ext);
+        } else {
+            // Bare dotfile like ".js", not in SAFE_EXACT_FILENAMES
+            return false;
+        }
+    }
+
+    // 4. Regular files with extensions (e.g. notes.TXT, a.txt.js)
+    if let Some((_stem, ext)) = file_name.rsplit_once('.') {
+        if ext.is_empty() || ext.ends_with(' ') || ext.ends_with('.') {
+            return false;
+        }
+        is_safe_text_extension(ext)
+    } else {
+        // No extension and not an exact safe filename
+        false
+    }
 }
 
 /// Platform-aware filename sanitization with explicit `is_windows` flag for testability.
@@ -753,7 +829,7 @@ pub async fn edit_remote_file(
 
     // 5. SEC-04: Safe Editor Execution
     // Check safe allowlist vs explicit custom editor vs safe fallback
-    let is_safe = is_safe_text_extension(raw_ext);
+    let is_safe = is_safe_file_for_open(&file_name);
     let custom_editor = editor.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
 
     if let Some(cmd_str) = custom_editor {
@@ -766,28 +842,64 @@ pub async fn edit_remote_file(
         }
         cmd.arg(&temp_path);
         cmd.spawn().map_err(|e| format!("Failed to launch configured editor '{}': {}", cmd_str, e))?;
-    } else if is_safe {
-        // Safe text file opened via system default handler
-        open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
     } else {
-        // Non-allowlisted type (e.g. .bat, .cmd, .exe, .vbs, .ps1, or extensionless):
-        // MUST NEVER call open::that() which could execute scripts/binaries!
         #[cfg(target_os = "windows")]
         {
-            log::info!(
-                "Non-allowlisted file '{}' opened safely with explicit notepad.exe",
-                file_name
-            );
-            let mut cmd = std::process::Command::new("notepad.exe");
-            cmd.arg(&temp_path);
-            cmd.spawn().map_err(|e| format!("Failed to open in Notepad: {}", e))?;
+            if is_safe {
+                // Allowlisted files on Windows still use open::that
+                open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
+            } else {
+                log::info!(
+                    "Non-allowlisted file '{}' opened safely with explicit notepad.exe",
+                    file_name
+                );
+                let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+                let mut notepad_path = PathBuf::from(&system_root).join("System32").join("notepad.exe");
+                if !notepad_path.exists() {
+                    notepad_path = PathBuf::from("C:\\Windows\\System32\\notepad.exe");
+                    if !notepad_path.exists() {
+                        notepad_path = PathBuf::from("C:\\Windows\\notepad.exe");
+                    }
+                }
+                let mut cmd = std::process::Command::new(&notepad_path);
+                cmd.arg(&temp_path);
+                cmd.spawn().map_err(|e| format!("Failed to open in Notepad ('{}'): {}", notepad_path.display(), e))?;
+            }
         }
-        #[cfg(not(target_os = "windows"))]
+
+        #[cfg(target_os = "macos")]
         {
-            return Err(format!(
-                "File type '{}' is not in the safe text allowlist. Please configure an external editor in Settings.",
-                raw_ext
-            ));
+            // macOS open -t <file>
+            let mut cmd = std::process::Command::new("open");
+            cmd.arg("-t").arg(&temp_path);
+            cmd.spawn().map_err(|e| format!("Failed to open default editor via open -t: {}", e))?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux xdg-open for allowlisted files only, otherwise return an error telling the user to configure an editor in Settings
+            if is_safe {
+                let mut cmd = std::process::Command::new("xdg-open");
+                cmd.arg(&temp_path);
+                cmd.spawn().map_err(|e| format!("Failed to open file via xdg-open: {}", e))?;
+            } else {
+                return Err(format!(
+                    "File '{}' is not in the safe text allowlist. Please configure an external editor in Settings.",
+                    file_name
+                ));
+            }
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            if is_safe {
+                open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
+            } else {
+                return Err(format!(
+                    "File '{}' is not in the safe text allowlist. Please configure an external editor in Settings.",
+                    file_name
+                ));
+            }
         }
     }
 
@@ -1035,19 +1147,39 @@ mod tests {
         assert!(is_safe_text_extension("md"));
         assert!(is_safe_text_extension("yaml"));
 
-        // Risky executable/script extensions must be rejected
-        assert!(!is_safe_text_extension("bat"));
-        assert!(!is_safe_text_extension("cmd"));
-        assert!(!is_safe_text_extension("exe"));
-        assert!(!is_safe_text_extension("vbs"));
-        assert!(!is_safe_text_extension("ps1"));
-        assert!(!is_safe_text_extension("hta"));
-        assert!(!is_safe_text_extension("lnk"));
-        assert!(!is_safe_text_extension(""));
+        // Script, executable, and spreadsheet extensions must be rejected (case-insensitive)
+        for ext in &[
+            "js", "py", "sh", "bash", "html", "htm", "csv", "tsv", "mjs", "cjs", "JS", "Py",
+            "bat", "cmd", "exe", "vbs", "ps1", "hta", "lnk", ""
+        ] {
+            assert!(!is_safe_text_extension(ext), "Extension {:?} should be rejected", ext);
+        }
     }
 
     #[test]
-    fn test_top_level_download_confinement() {
+    fn test_safe_file_for_open() {
+        // Assert js, py, sh, bash, html, htm, csv, tsv, mjs, cjs, JS, Py are rejected
+        for risky in &[
+            "js", "py", "sh", "bash", "html", "htm", "csv", "tsv", "mjs", "cjs", "JS", "Py"
+        ] {
+            assert!(!is_safe_file_for_open(risky), "Target {:?} should be rejected", risky);
+        }
+
+        // Assert run.bat., run.js (trailing space), a.txt.js, .js are rejected
+        assert!(!is_safe_file_for_open("run.bat."));
+        assert!(!is_safe_file_for_open("run.js "));
+        assert!(!is_safe_file_for_open("a.txt.js"));
+        assert!(!is_safe_file_for_open(".js"));
+
+        // Assert Dockerfile, .bashrc, Makefile, notes.TXT are accepted
+        assert!(is_safe_file_for_open("Dockerfile"));
+        assert!(is_safe_file_for_open(".bashrc"));
+        assert!(is_safe_file_for_open("Makefile"));
+        assert!(is_safe_file_for_open("notes.TXT"));
+    }
+
+    #[test]
+    fn test_download_confinement_backslash_traversal() {
         let temp = tempfile::tempdir().unwrap();
         let dest = temp.path();
 
@@ -1067,6 +1199,12 @@ mod tests {
             assert_eq!(name_unix, r"..\..\evil.txt");
             assert_eq!(target_unix, dest_c.join(r"..\..\evil.txt"));
         }
+    }
+
+    #[test]
+    fn test_download_confinement_windows_drive_relative() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path();
 
         // (b) C:evil.txt is rejected (cfg windows)
         #[cfg(windows)]
@@ -1074,17 +1212,57 @@ mod tests {
             let res_drive = resolve_download_target_with_rules("/remote/C:evil.txt", dest, true);
             assert!(res_drive.is_err(), "Expected C:evil.txt to be rejected on Windows");
         }
+    }
+
+    #[test]
+    fn test_download_confinement_dot_and_nul() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path();
 
         // Rejection of "." and ".." and names with '/' or NUL
         assert!(resolve_download_target_with_rules("/remote/.", dest, true).is_err());
         assert!(resolve_download_target_with_rules("/remote/..", dest, true).is_err());
         assert!(resolve_download_target_with_rules("/remote/foo\0bar", dest, true).is_err());
+    }
+
+    #[test]
+    fn test_download_confinement_root_and_trailing_slash() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path();
+
+        // Root "/" and "///" must be rejected (no filename)
+        assert!(resolve_download_target_with_rules("/", dest, cfg!(windows)).is_err());
+        assert!(resolve_download_target_with_rules("///", dest, cfg!(windows)).is_err());
+        assert!(resolve_download_target_with_rules("", dest, cfg!(windows)).is_err());
+
+        // Trailing slashes should resolve the last non-empty segment
+        let res_trailing = resolve_download_target_with_rules("/remote/my_folder/", dest, cfg!(windows)).unwrap();
+        assert_eq!(res_trailing.1, "my_folder");
+        assert_eq!(res_trailing.2, res_trailing.0.join("my_folder"));
+        assert!(is_path_confined(&res_trailing.0, &res_trailing.2));
+
+        let res_multi_trailing = resolve_download_target_with_rules("/remote/another_folder///", dest, cfg!(windows)).unwrap();
+        assert_eq!(res_multi_trailing.1, "another_folder");
+        assert_eq!(res_multi_trailing.2, res_multi_trailing.0.join("another_folder"));
+        assert!(is_path_confined(&res_multi_trailing.0, &res_multi_trailing.2));
+    }
+
+    #[test]
+    fn test_download_confinement_normal_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path();
 
         // (d) a normal name downloads into destination_dir
         let res_normal = resolve_download_target_with_rules("/var/log/report.txt", dest, cfg!(windows)).unwrap();
         assert_eq!(res_normal.1, "report.txt");
         assert_eq!(res_normal.2, res_normal.0.join("report.txt"));
         assert!(is_path_confined(&res_normal.0, &res_normal.2));
+    }
+
+    #[test]
+    fn test_download_confinement_circular_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path();
 
         // (e) the circular-anchor case: <dest>/../../evil.txt must fail confinement against the chosen folder
         let circular_target = dest.join("../../evil.txt");
