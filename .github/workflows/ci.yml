@@ -61,6 +61,3 @@ jobs:
         run: cargo clippy --all-targets
         working-directory: src-tauri
 
-      - name: Run frontend typecheck (non-blocking)
-        continue-on-error: true
-        run: npx nuxi prepare && npx nuxi typecheck
