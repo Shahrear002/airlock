@@ -38,6 +38,7 @@ notify = { version = "7", features = ["macos_kqueue"] }
 tempfile = "3"
 open = "5"
 dunce = "1.0"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.4"

@@ -59,6 +59,384 @@ pub enum TargetOs {
     Other,
 }
 
+impl AsRef<str> for TargetOs {
+    fn as_ref(&self) -> &str {
+        match self {
+            TargetOs::Windows => "windows",
+            TargetOs::Macos => "macos",
+            TargetOs::Linux => "linux",
+            TargetOs::Other => "other",
+        }
+    }
+}
+
+/// Trait for persisting and retrieving the user's configured external editor path.
+pub trait EditorStore: Send + Sync {
+    fn get(&self) -> Result<Option<String>, String>;
+    fn set(&self, path: &str) -> Result<(), String>;
+    fn clear(&self) -> Result<(), String>;
+}
+
+/// Keyring-backed external editor store targeting the OS secure credential store.
+pub struct KeyringEditorStore {
+    service: String,
+    account: String,
+}
+
+impl KeyringEditorStore {
+    pub fn new() -> Self {
+        Self {
+            service: "com.airlock.app".to_string(),
+            account: "external_editor".to_string(),
+        }
+    }
+}
+
+impl Default for KeyringEditorStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EditorStore for KeyringEditorStore {
+    fn get(&self) -> Result<Option<String>, String> {
+        let entry = keyring::Entry::new(&self.service, &self.account).map_err(|e| {
+            format!(
+                "Failed to access OS keyring: {}. On Linux, ensure Secret Service is running.",
+                e
+            )
+        })?;
+        match entry.get_password() {
+            Ok(val) => {
+                let trimmed = val.trim().to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed))
+                }
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(format!(
+                "Failed to read editor from OS keyring: {}. On Linux, ensure Secret Service is running.",
+                e
+            )),
+        }
+    }
+
+    fn set(&self, path: &str) -> Result<(), String> {
+        let entry = keyring::Entry::new(&self.service, &self.account).map_err(|e| {
+            format!(
+                "Failed to access OS keyring: {}. On Linux, ensure Secret Service is running.",
+                e
+            )
+        })?;
+        entry.set_password(path).map_err(|e| {
+            format!(
+                "Failed to store editor in OS keyring: {}. On Linux, ensure Secret Service is running.",
+                e
+            )
+        })?;
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), String> {
+        let entry = keyring::Entry::new(&self.service, &self.account).map_err(|e| {
+            format!(
+                "Failed to access OS keyring: {}. On Linux, ensure Secret Service is running.",
+                e
+            )
+        })?;
+        match entry.delete_credential() {
+            Ok(_) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!(
+                "Failed to clear editor from OS keyring: {}. On Linux, ensure Secret Service is running.",
+                e
+            )),
+        }
+    }
+}
+
+/// In-memory mock store for unit testing without touching the OS keyring.
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct MockEditorStore {
+    editor: std::sync::Mutex<Option<String>>,
+}
+
+#[allow(dead_code)]
+impl MockEditorStore {
+    pub fn new() -> Self {
+        Self {
+            editor: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn with_editor(path: &str) -> Self {
+        Self {
+            editor: std::sync::Mutex::new(Some(path.to_string())),
+        }
+    }
+}
+
+impl EditorStore for MockEditorStore {
+    fn get(&self) -> Result<Option<String>, String> {
+        let lock = self.editor.lock().map_err(|e| e.to_string())?;
+        Ok(lock.clone())
+    }
+
+    fn set(&self, path: &str) -> Result<(), String> {
+        let mut lock = self.editor.lock().map_err(|e| e.to_string())?;
+        *lock = Some(path.to_string());
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), String> {
+        let mut lock = self.editor.lock().map_err(|e| e.to_string())?;
+        *lock = None;
+        Ok(())
+    }
+}
+
+/// Facts about a filesystem path used for validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathFacts {
+    pub exists: bool,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub is_executable: bool,
+}
+
+#[allow(dead_code)]
+impl PathFacts {
+    pub fn new(exists: bool, is_file: bool, is_dir: bool, is_executable: bool) -> Self {
+        Self {
+            exists,
+            is_file,
+            is_dir,
+            is_executable,
+        }
+    }
+
+    pub fn file(executable: bool) -> Self {
+        Self {
+            exists: true,
+            is_file: true,
+            is_dir: false,
+            is_executable: executable,
+        }
+    }
+
+    pub fn dir() -> Self {
+        Self {
+            exists: true,
+            is_file: false,
+            is_dir: true,
+            is_executable: false,
+        }
+    }
+
+    pub fn not_found() -> Self {
+        Self {
+            exists: false,
+            is_file: false,
+            is_dir: false,
+            is_executable: false,
+        }
+    }
+}
+
+/// Helper to determine if a path is absolute for a given target OS.
+pub fn is_path_absolute_for_os(os: &str, path: &Path) -> bool {
+    let path_str = path.to_str().unwrap_or("");
+    match os {
+        "windows" => {
+            let bytes = path_str.as_bytes();
+            (bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/'))
+                || (bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\')
+        }
+        "macos" | "linux" => path_str.starts_with('/'),
+        _ => path.is_absolute(),
+    }
+}
+
+/// Pure validation logic checking whether an external editor path meets platform security rules.
+pub fn validate_editor_path_with_rules<O: AsRef<str>>(
+    os: O,
+    path: &Path,
+    facts: &PathFacts,
+) -> Result<(), String> {
+    let os_str = os.as_ref().to_ascii_lowercase();
+
+    // 1. Must be absolute
+    if !is_path_absolute_for_os(&os_str, path) {
+        return Err("Editor path must be an absolute path".into());
+    }
+
+    // 2. Must exist
+    if !facts.exists {
+        return Err(format!("Editor path '{}' does not exist", path.display()));
+    }
+
+    // Extract filename / bundle name
+    let path_str = path.to_str().unwrap_or("");
+    let file_name = path_str
+        .rsplit('/')
+        .next()
+        .unwrap_or(path_str)
+        .rsplit('\\')
+        .next()
+        .unwrap_or(path_str);
+
+    match os_str.as_str() {
+        "windows" => {
+            // Must be a file
+            if !facts.is_file {
+                return Err("Editor path on Windows must be a file".into());
+            }
+
+            // Must be .exe only
+            if let Some((stem, ext)) = file_name.rsplit_once('.') {
+                if stem.is_empty() || !ext.eq_ignore_ascii_case("exe") {
+                    return Err(format!(
+                        "External editor on Windows must be an executable (.exe) file, got '{}'",
+                        file_name
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "External editor on Windows must have a .exe extension, got '{}'",
+                    file_name
+                ));
+            }
+
+            Ok(())
+        }
+        "macos" => {
+            if facts.is_dir {
+                // Must be a .app bundle directory
+                if file_name.to_ascii_lowercase().ends_with(".app") {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Directory '{}' is not a valid macOS .app bundle",
+                        file_name
+                    ))
+                }
+            } else if facts.is_file {
+                if !facts.is_executable {
+                    return Err(format!(
+                        "macOS editor binary '{}' must have execute permissions",
+                        file_name
+                    ));
+                }
+                Ok(())
+            } else {
+                Err("macOS editor must be a .app bundle directory or an executable file".into())
+            }
+        }
+        "linux" => {
+            if !facts.is_file {
+                return Err("Editor path on Linux must be a file".into());
+            }
+            if !facts.is_executable {
+                return Err(format!(
+                    "Editor path on Linux '{}' must have execute permissions",
+                    file_name
+                ));
+            }
+            Ok(())
+        }
+        _ => {
+            if !facts.is_file {
+                return Err("Editor path must be a file".into());
+            }
+            if !facts.is_executable {
+                return Err(format!(
+                    "Editor path '{}' must have execute permissions",
+                    file_name
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Retrieve path facts from the local filesystem for path validation.
+pub fn get_path_facts(path: &Path) -> PathFacts {
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return PathFacts::not_found(),
+    };
+
+    let is_dir = metadata.is_dir();
+    let is_file = metadata.is_file();
+
+    #[cfg(unix)]
+    let is_executable = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    };
+
+    #[cfg(windows)]
+    let is_executable = {
+        is_file
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("exe"))
+                .unwrap_or(false)
+    };
+
+    #[cfg(not(any(unix, windows)))]
+    let is_executable = is_file;
+
+    PathFacts {
+        exists: true,
+        is_file,
+        is_dir,
+        is_executable,
+    }
+}
+
+/// Thin wrapper that validates an external editor path against the current operating system rules.
+pub fn validate_editor_path(path: &Path) -> Result<(), String> {
+    let current_os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    };
+
+    let facts = get_path_facts(path);
+    validate_editor_path_with_rules(current_os, path, &facts)
+}
+
+/// Builds the process command for launching the configured editor without shell execution or whitespace splitting.
+pub fn build_configured_editor_command(
+    editor_path: &Path,
+    file_path: &Path,
+) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg("-a").arg(editor_path).arg(file_path);
+        cmd
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut cmd = std::process::Command::new(editor_path);
+        cmd.arg(file_path);
+        cmd
+    }
+}
+
 /// Strategy for opening a file in an editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenMethod {
@@ -883,7 +1261,6 @@ pub async fn edit_remote_file(
     state: State<'_, AppState>,
     id: String,
     remote_path: String,
-    editor: Option<String>,
 ) -> Result<(), String> {
     // 1. Get the SSH handle
     let handle = {
@@ -936,9 +1313,9 @@ pub async fn edit_remote_file(
         }
         total_read += n as u64;
         if total_read > MAX_EDIT_FILE_SIZE {
-            return Err(format!(
-                "File exceeded maximum allowed edit size of 20 MB during transfer"
-            ));
+            return Err(
+                "File exceeded maximum allowed edit size of 20 MB during transfer".to_string(),
+            );
         }
         contents.extend_from_slice(&buf[..n]);
     }
@@ -985,7 +1362,21 @@ pub async fn edit_remote_file(
     drop(file);
 
     // 5. SEC-04: Safe Editor Execution
-    let custom_editor = editor.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let configured_editor = state.editor_store.get()?;
+    let validated_editor = if let Some(ref ed_path_str) = configured_editor {
+        let p = Path::new(ed_path_str);
+        validate_editor_path(p).map_err(|e| {
+            format!(
+                "Configured external editor '{}' is invalid: {}",
+                ed_path_str, e
+            )
+        })?;
+        Some(ed_path_str.clone())
+    } else {
+        None
+    };
+    let has_editor = validated_editor.is_some();
+
     let current_os = if cfg!(target_os = "windows") {
         TargetOs::Windows
     } else if cfg!(target_os = "macos") {
@@ -996,22 +1387,19 @@ pub async fn edit_remote_file(
         TargetOs::Other
     };
 
-    let method = choose_open_method(current_os, &file_name, custom_editor.is_some())?;
+    let method = choose_open_method(current_os, &file_name, has_editor)?;
 
     match method {
         OpenMethod::ConfiguredEditor => {
-            let cmd_str = custom_editor.unwrap();
-            let mut parts = cmd_str.split_whitespace();
-            let program = parts
-                .next()
-                .ok_or_else(|| "Invalid editor command".to_string())?;
-            let mut cmd = std::process::Command::new(program);
-            for arg in parts {
-                cmd.arg(arg);
-            }
-            cmd.arg(&temp_path);
-            cmd.spawn()
-                .map_err(|e| format!("Failed to launch configured editor '{}': {}", cmd_str, e))?;
+            let editor_path =
+                validated_editor.ok_or_else(|| "No external editor configured".to_string())?;
+            let mut cmd = build_configured_editor_command(Path::new(&editor_path), &temp_path);
+            cmd.spawn().map_err(|e| {
+                format!(
+                    "Failed to launch configured editor '{}': {}",
+                    editor_path, e
+                )
+            })?;
         }
         OpenMethod::SystemDefault => {
             open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
@@ -1650,5 +2038,248 @@ mod tests {
             !test_file.exists(),
             "Cleanup must purge orphaned edit files"
         );
+    }
+
+    #[test]
+    fn test_validate_editor_path_matrix_windows() {
+        // Windows rejects .bat .cmd .ps1 .vbs .js
+        let bad_exts = ["bat", "cmd", "ps1", "vbs", "js"];
+        for ext in &bad_exts {
+            let p_str = format!(r"C:\tools\editor.{}", ext);
+            let p = Path::new(&p_str);
+            let res = validate_editor_path_with_rules("windows", p, &PathFacts::file(true));
+            assert!(res.is_err(), "Windows must reject .{} external editor", ext);
+        }
+
+        // Relative paths rejected
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new("notepad.exe"),
+                &PathFacts::file(true)
+            )
+            .is_err(),
+            "Windows must reject relative path"
+        );
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new(r".\notepad.exe"),
+                &PathFacts::file(true)
+            )
+            .is_err(),
+            "Windows must reject relative path .\\"
+        );
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new(r"tools\notepad.exe"),
+                &PathFacts::file(true)
+            )
+            .is_err(),
+            "Windows must reject relative path tools\\"
+        );
+
+        // Directories rejected
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new(r"C:\Windows\System32"),
+                &PathFacts::dir()
+            )
+            .is_err(),
+            "Windows must reject directories"
+        );
+
+        // Missing files rejected
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new(r"C:\Windows\nonexistent.exe"),
+                &PathFacts::not_found()
+            )
+            .is_err(),
+            "Windows must reject missing files"
+        );
+
+        // Accepts .exe (with spaces, different cases)
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new(r"C:\Windows\notepad.exe"),
+                &PathFacts::file(true)
+            )
+            .is_ok(),
+            "Windows must accept .exe"
+        );
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new(r"C:\Program Files\Notepad++\notepad++.exe"),
+                &PathFacts::file(true)
+            )
+            .is_ok(),
+            "Windows must accept .exe path with spaces"
+        );
+        assert!(
+            validate_editor_path_with_rules(
+                "windows",
+                Path::new(r"C:\Windows\NOTEPAD.EXE"),
+                &PathFacts::file(true)
+            )
+            .is_ok(),
+            "Windows must accept .EXE in uppercase"
+        );
+    }
+
+    #[test]
+    fn test_validate_editor_path_matrix_macos() {
+        // Accepts .app directories
+        assert!(
+            validate_editor_path_with_rules(
+                "macos",
+                Path::new("/Applications/Visual Studio Code.app"),
+                &PathFacts::dir()
+            )
+            .is_ok(),
+            "macOS must accept .app bundle directory"
+        );
+        // Accepts executable files
+        assert!(
+            validate_editor_path_with_rules(
+                "macos",
+                Path::new("/usr/local/bin/code"),
+                &PathFacts::file(true)
+            )
+            .is_ok(),
+            "macOS must accept executable file"
+        );
+        // Rejects non-executable files
+        assert!(
+            validate_editor_path_with_rules(
+                "macos",
+                Path::new("/usr/local/bin/script.sh"),
+                &PathFacts::file(false)
+            )
+            .is_err(),
+            "macOS must reject non-executable file"
+        );
+        // Rejects non-.app directories
+        assert!(
+            validate_editor_path_with_rules(
+                "macos",
+                Path::new("/Applications/Visual Studio Code"),
+                &PathFacts::dir()
+            )
+            .is_err(),
+            "macOS must reject directory without .app extension"
+        );
+        // Rejects relative paths
+        assert!(
+            validate_editor_path_with_rules("macos", Path::new("Code.app"), &PathFacts::dir())
+                .is_err(),
+            "macOS must reject relative path"
+        );
+        // Rejects missing paths
+        assert!(
+            validate_editor_path_with_rules(
+                "macos",
+                Path::new("/Applications/Code.app"),
+                &PathFacts::not_found()
+            )
+            .is_err(),
+            "macOS must reject missing file"
+        );
+    }
+
+    #[test]
+    fn test_validate_editor_path_matrix_linux() {
+        // Rejects non-executable files
+        assert!(
+            validate_editor_path_with_rules(
+                "linux",
+                Path::new("/usr/bin/nano"),
+                &PathFacts::file(false)
+            )
+            .is_err(),
+            "Linux must reject non-executable file"
+        );
+        // Accepts executable files
+        assert!(
+            validate_editor_path_with_rules(
+                "linux",
+                Path::new("/usr/bin/nano"),
+                &PathFacts::file(true)
+            )
+            .is_ok(),
+            "Linux must accept executable file"
+        );
+        // Rejects directories
+        assert!(
+            validate_editor_path_with_rules("linux", Path::new("/usr/bin"), &PathFacts::dir())
+                .is_err(),
+            "Linux must reject directories"
+        );
+        // Rejects relative paths
+        assert!(
+            validate_editor_path_with_rules("linux", Path::new("nano"), &PathFacts::file(true))
+                .is_err(),
+            "Linux must reject relative path"
+        );
+        // Rejects missing files
+        assert!(
+            validate_editor_path_with_rules(
+                "linux",
+                Path::new("/usr/bin/nano"),
+                &PathFacts::not_found()
+            )
+            .is_err(),
+            "Linux must reject missing file"
+        );
+    }
+
+    #[test]
+    fn test_editor_store_mock_roundtrip() {
+        let store = MockEditorStore::new();
+        assert_eq!(store.get().unwrap(), None);
+
+        store.set("/usr/bin/custom-editor").unwrap();
+        assert_eq!(
+            store.get().unwrap(),
+            Some("/usr/bin/custom-editor".to_string())
+        );
+
+        store.clear().unwrap();
+        assert_eq!(store.get().unwrap(), None);
+    }
+
+    #[test]
+    fn test_edit_remote_file_uses_configured_editor_without_param() {
+        let store = MockEditorStore::with_editor("/usr/bin/custom-editor");
+        let configured = store.get().unwrap();
+        assert_eq!(configured, Some("/usr/bin/custom-editor".to_string()));
+
+        let method =
+            choose_open_method(TargetOs::Linux, "notes.txt", configured.is_some()).unwrap();
+        assert_eq!(method, OpenMethod::ConfiguredEditor);
+
+        // Verify command construction preserves spaces and uses exact executable path without shell
+        let ed_path = Path::new(r"C:\Program Files\Notepad++\notepad++.exe");
+        let temp_file = Path::new(r"C:\temp\file.txt");
+        let cmd = build_configured_editor_command(ed_path, temp_file);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(cmd.get_program(), "open");
+            let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+            assert_eq!(args[0], "-a");
+            assert_eq!(args[1], ed_path.as_os_str());
+            assert_eq!(args[2], temp_file.as_os_str());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(cmd.get_program(), ed_path.as_os_str());
+            let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+            assert_eq!(args, vec![temp_file.as_os_str()]);
+        }
     }
 }

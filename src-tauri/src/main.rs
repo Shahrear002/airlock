@@ -92,6 +92,49 @@ async fn resize_pty(
     }
 }
 
+#[tauri::command]
+async fn pick_external_editor(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut builder = app.dialog().file().set_title("Select External Editor");
+
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.add_filter("Executable Files", &["exe"]);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.add_filter("Applications & Binaries", &["app"]);
+    }
+
+    let file_path = builder
+        .blocking_pick_file()
+        .ok_or_else(|| "No file selected".to_string())?;
+
+    let path_buf = file_path
+        .into_path()
+        .map_err(|_| "Failed to convert chosen path to filesystem path".to_string())?;
+
+    sftp::validate_editor_path(&path_buf)?;
+
+    let path_str = path_buf.to_string_lossy().to_string();
+    state.editor_store.set(&path_str)?;
+    Ok(path_str)
+}
+
+#[tauri::command]
+async fn get_external_editor(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
+    state.editor_store.get()
+}
+
+#[tauri::command]
+async fn clear_external_editor(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.editor_store.clear()
+}
+
 fn main() {
     // SEC-04: Purge orphaned temp edit files from previous crashes or ungraceful exits
     sftp::cleanup_temp_edits();
@@ -113,7 +156,7 @@ fn main() {
             respond_host_key,
             get_known_hosts,
             remove_known_host,
-            // SFTP
+            // SFTP & Editor
             sftp_list_dir,
             local_list_dir,
             get_local_home_dir,
@@ -121,6 +164,9 @@ fn main() {
             sftp_download,
             cancel_transfer,
             edit_remote_file,
+            pick_external_editor,
+            get_external_editor,
+            clear_external_editor,
             // VPN — WireGuard
             start_vpn_tunnel,
             stop_vpn_tunnel,

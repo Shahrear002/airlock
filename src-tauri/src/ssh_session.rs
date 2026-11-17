@@ -54,6 +54,7 @@ pub struct AppState {
     pub active_transfers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub host_key_prompts:
         Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HostKeyDecision>>>>,
+    pub editor_store: Arc<dyn crate::sftp::EditorStore>,
 }
 
 impl AppState {
@@ -62,6 +63,17 @@ impl AppState {
             connections: Arc::new(Mutex::new(HashMap::new())),
             active_transfers: Arc::new(Mutex::new(HashMap::new())),
             host_key_prompts: Arc::new(Mutex::new(HashMap::new())),
+            editor_store: Arc::new(crate::sftp::KeyringEditorStore::new()),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_editor_store(editor_store: Arc<dyn crate::sftp::EditorStore>) -> Self {
+        Self {
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            active_transfers: Arc::new(Mutex::new(HashMap::new())),
+            host_key_prompts: Arc::new(Mutex::new(HashMap::new())),
+            editor_store,
         }
     }
 }
