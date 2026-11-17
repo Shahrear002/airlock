@@ -171,7 +171,6 @@ export const builtinThemes: Record<string, TerminalTheme> = {
 export const useSettingsStore = defineStore('settings', () => {
     const appTheme = ref<'default' | 'glass'>('default')
     const terminalThemeName = ref<string>('Dracula')
-    const externalEditor = ref<string>('')
     const userThemes = ref<Record<string, TerminalTheme>>({})
     const _hydrated = ref(false)
 
@@ -188,7 +187,12 @@ export const useSettingsStore = defineStore('settings', () => {
                 const data = JSON.parse(raw)
                 if (data.appTheme) appTheme.value = data.appTheme
                 if (data.terminalThemeName) terminalThemeName.value = data.terminalThemeName
-                if (data.externalEditor !== undefined) externalEditor.value = data.externalEditor
+                // If legacy externalEditor exists in settings-prefs, delete it so it is purged
+                if ('externalEditor' in data) {
+                    delete data.externalEditor
+                    await _store.set('settings-prefs', JSON.stringify(data))
+                    await _store.save()
+                }
             }
         } catch (e) {
             console.error('[SettingsStore] Failed to load settings:', e)
@@ -203,7 +207,6 @@ export const useSettingsStore = defineStore('settings', () => {
             const data = JSON.stringify({
                 appTheme: appTheme.value,
                 terminalThemeName: terminalThemeName.value,
-                externalEditor: externalEditor.value,
             })
             await _store.set('settings-prefs', data)
             await _store.save()
@@ -213,7 +216,7 @@ export const useSettingsStore = defineStore('settings', () => {
     }
 
     // Watch for changes and persist
-    watch([appTheme, terminalThemeName, externalEditor], () => {
+    watch([appTheme, terminalThemeName], () => {
         _saveSettings()
     })
 
@@ -271,7 +274,6 @@ export const useSettingsStore = defineStore('settings', () => {
     return {
         appTheme,
         terminalThemeName,
-        externalEditor,
         currentTheme,
         userThemes,
         allThemes,

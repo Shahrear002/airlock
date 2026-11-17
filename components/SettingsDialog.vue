@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { useSettingsStore } from '~/stores/settings'
 import { useHostsStore } from '~/stores/hosts'
 import { save, open as openFileDialog } from '@tauri-apps/plugin-dialog'
@@ -24,6 +24,48 @@ const props = defineProps<{
 const emit = defineEmits(['update:open'])
 const hostsStore = useHostsStore()
 const settingsStore = useSettingsStore()
+
+// ── External Editor (SEC-04) ────────────────────────────────────────────────
+const externalEditorPath = ref<string | null>(null)
+const editorError = ref('')
+
+const fetchExternalEditor = async () => {
+    try {
+        editorError.value = ''
+        externalEditorPath.value = await invoke<string | null>('get_external_editor')
+    } catch (e: any) {
+        editorError.value = typeof e === 'string' ? e : (e?.message || 'Failed to load external editor')
+    }
+}
+
+const handleBrowseEditor = async () => {
+    try {
+        editorError.value = ''
+        const chosen = await invoke<string>('pick_external_editor')
+        if (chosen) {
+            externalEditorPath.value = chosen
+        }
+    } catch (e: any) {
+        if (typeof e === 'string' && e.includes('No file selected')) {
+            return
+        }
+        editorError.value = typeof e === 'string' ? e : (e?.message || 'Failed to set external editor')
+    }
+}
+
+const handleClearEditor = async () => {
+    try {
+        editorError.value = ''
+        await invoke('clear_external_editor')
+        externalEditorPath.value = null
+    } catch (e: any) {
+        editorError.value = typeof e === 'string' ? e : (e?.message || 'Failed to clear external editor')
+    }
+}
+
+onMounted(() => {
+    fetchExternalEditor()
+})
 
 // ── Theme import ─────────────────────────────────────────────────────────────
 const handleImportTheme = async () => {
@@ -103,6 +145,7 @@ const copyFp = async (fp: string) => {
 watch(() => props.open, (isOpen) => {
     if (isOpen) {
         fetchKnownHosts()
+        fetchExternalEditor()
     }
 })
 
@@ -267,15 +310,38 @@ const reset = () => {
             <FileCode class="w-4 h-4 text-sky-400" /> Editor & SFTP
           </div>
           <div class="space-y-2">
-            <Label :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/80' : ''">External Editor Command</Label>
-            <Input 
-              v-model="settingsStore.externalEditor" 
-              placeholder="e.g. code, notepad.exe, subl, gedit"
-              class="text-xs font-mono"
-              :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white' : ''"
-            />
+            <Label :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/80' : ''">External Editor Path</Label>
+            <div class="flex items-center gap-2">
+              <Input 
+                :value="externalEditorPath || 'System default'" 
+                readonly
+                disabled
+                class="text-xs font-mono flex-1 cursor-default opacity-90"
+                :class="settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14] !border-white/10 !text-white' : ''"
+              />
+              <Button 
+                variant="outline" 
+                size="sm" 
+                @click="handleBrowseEditor"
+                :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''"
+              >
+                Browse
+              </Button>
+              <Button 
+                v-if="externalEditorPath"
+                variant="outline" 
+                size="sm" 
+                @click="handleClearEditor"
+                :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''"
+              >
+                Clear
+              </Button>
+            </div>
+            <div v-if="editorError" class="text-xs text-red-500 font-medium">
+              {{ editorError }}
+            </div>
             <p class="text-[11px] leading-relaxed" :class="settingsStore.appTheme === 'glass' ? 'text-white/60' : 'text-muted-foreground'">
-              Command or executable used for "Edit Locally" in SFTP. If empty, files in the safe text allowlist open in your system default editor, while non-allowlisted files (scripts, batch files, executables) open strictly as text via Notepad on Windows or require an editor here.
+              Executable used for "Edit Locally" in SFTP, stored securely in the OS keyring. If not set, files in the safe text allowlist open in your system default editor, while non-allowlisted files open via Notepad on Windows or require an editor here.
             </p>
           </div>
         </div>
