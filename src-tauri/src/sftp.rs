@@ -418,22 +418,99 @@ pub fn validate_editor_path(path: &Path) -> Result<(), String> {
     validate_editor_path_with_rules(current_os, path, &facts)
 }
 
+/// Pure helper to resolve the external editor from the store and validate it.
+/// If reading from the store fails (e.g. OS keyring unavailable), it logs a warning
+/// and falls back to `Ok(None)` so Edit Locally is never blocked.
+/// If a configured path fails validation, returns an error pointing the user to Settings.
+pub fn resolve_configured_editor(
+    store: &dyn EditorStore,
+    validate: impl Fn(&Path) -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    let configured_editor = match store.get() {
+        Ok(Some(path)) => {
+            let trimmed = path.trim().to_string();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+        }
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            log::warn!(
+                "Failed to read external editor from keyring: {}. Defaulting to system editor.",
+                e
+            );
+            return Ok(None);
+        }
+    };
+
+    let p = Path::new(&configured_editor);
+    validate(p).map_err(|e| {
+        format!(
+            "Configured external editor '{}' is invalid: {}. Please configure a valid editor in Settings.",
+            configured_editor, e
+        )
+    })?;
+
+    Ok(Some(configured_editor))
+}
+
+/// Kind of launch mechanism for the configured external editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorLaunchKind {
+    MacosOpenApp,
+    DirectExecutable,
+}
+
+/// Pure decision function determining how the configured editor should be launched.
+/// On macOS, `.app` bundle directories must be launched via `open -a <app> <file>`,
+/// while plain binaries (e.g. /usr/local/bin/code) and editors on other OSes
+/// are spawned directly via `Command::new(path).arg(file)`.
+pub fn editor_launch_kind<O: AsRef<str>>(os: O, path: &Path, is_dir: bool) -> EditorLaunchKind {
+    let os_str = os.as_ref().to_ascii_lowercase();
+    if os_str == "macos" && is_dir {
+        let path_str = path.to_str().unwrap_or("");
+        let file_name = path_str
+            .rsplit('/')
+            .next()
+            .unwrap_or(path_str)
+            .rsplit('\\')
+            .next()
+            .unwrap_or(path_str);
+        if file_name.to_ascii_lowercase().ends_with(".app") {
+            return EditorLaunchKind::MacosOpenApp;
+        }
+    }
+    EditorLaunchKind::DirectExecutable
+}
+
 /// Builds the process command for launching the configured editor without shell execution or whitespace splitting.
 pub fn build_configured_editor_command(
     editor_path: &Path,
     file_path: &Path,
 ) -> std::process::Command {
-    #[cfg(target_os = "macos")]
-    {
-        let mut cmd = std::process::Command::new("open");
-        cmd.arg("-a").arg(editor_path).arg(file_path);
-        cmd
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut cmd = std::process::Command::new(editor_path);
-        cmd.arg(file_path);
-        cmd
+    let current_os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    };
+
+    let kind = editor_launch_kind(current_os, editor_path, editor_path.is_dir());
+    match kind {
+        EditorLaunchKind::MacosOpenApp => {
+            let mut cmd = std::process::Command::new("open");
+            cmd.arg("-a").arg(editor_path).arg(file_path);
+            cmd
+        }
+        EditorLaunchKind::DirectExecutable => {
+            let mut cmd = std::process::Command::new(editor_path);
+            cmd.arg(file_path);
+            cmd
+        }
     }
 }
 
@@ -1362,19 +1439,7 @@ pub async fn edit_remote_file(
     drop(file);
 
     // 5. SEC-04: Safe Editor Execution
-    let configured_editor = state.editor_store.get()?;
-    let validated_editor = if let Some(ref ed_path_str) = configured_editor {
-        let p = Path::new(ed_path_str);
-        validate_editor_path(p).map_err(|e| {
-            format!(
-                "Configured external editor '{}' is invalid: {}",
-                ed_path_str, e
-            )
-        })?;
-        Some(ed_path_str.clone())
-    } else {
-        None
-    };
+    let validated_editor = resolve_configured_editor(&*state.editor_store, validate_editor_path)?;
     let has_editor = validated_editor.is_some();
 
     let current_os = if cfg!(target_os = "windows") {
@@ -1394,12 +1459,15 @@ pub async fn edit_remote_file(
             let editor_path =
                 validated_editor.ok_or_else(|| "No external editor configured".to_string())?;
             let mut cmd = build_configured_editor_command(Path::new(&editor_path), &temp_path);
-            cmd.spawn().map_err(|e| {
+            let mut child = cmd.spawn().map_err(|e| {
                 format!(
                     "Failed to launch configured editor '{}': {}",
                     editor_path, e
                 )
             })?;
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
         OpenMethod::SystemDefault => {
             open::that(&temp_path).map_err(|e| format!("Failed to open default editor: {}", e))?;
@@ -1422,25 +1490,36 @@ pub async fn edit_remote_file(
             }
             let mut cmd = std::process::Command::new(&notepad_path);
             cmd.arg(&temp_path);
-            cmd.spawn().map_err(|e| {
+            let mut child = cmd.spawn().map_err(|e| {
                 format!(
                     "Failed to open in Notepad ('{}'): {}",
                     notepad_path.display(),
                     e
                 )
             })?;
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
         OpenMethod::MacosOpenText => {
             let mut cmd = std::process::Command::new("open");
             cmd.arg("-t").arg(&temp_path);
-            cmd.spawn()
+            let mut child = cmd
+                .spawn()
                 .map_err(|e| format!("Failed to open default editor via open -t: {}", e))?;
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
         OpenMethod::LinuxXdgOpen => {
             let mut cmd = std::process::Command::new("xdg-open");
             cmd.arg(&temp_path);
-            cmd.spawn()
+            let mut child = cmd
+                .spawn()
                 .map_err(|e| format!("Failed to open file via xdg-open: {}", e))?;
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
     }
 
@@ -2238,6 +2317,21 @@ mod tests {
         );
     }
 
+    #[allow(dead_code)]
+    pub struct FailingEditorStore;
+
+    impl EditorStore for FailingEditorStore {
+        fn get(&self) -> Result<Option<String>, String> {
+            Err("Keyring daemon is unavailable".to_string())
+        }
+        fn set(&self, _path: &str) -> Result<(), String> {
+            Err("Keyring daemon is unavailable".to_string())
+        }
+        fn clear(&self) -> Result<(), String> {
+            Err("Keyring daemon is unavailable".to_string())
+        }
+    }
+
     #[test]
     fn test_editor_store_mock_roundtrip() {
         let store = MockEditorStore::new();
@@ -2254,6 +2348,93 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_configured_editor() {
+        // 1. FailingEditorStore (store error -> Ok(None))
+        let failing_store = FailingEditorStore;
+        let res = resolve_configured_editor(&failing_store, |_| Ok(()));
+        assert_eq!(
+            res,
+            Ok(None),
+            "Keyring read error must be swallowed and treated as no editor configured"
+        );
+
+        // 2. Invalid configured path (store returns Some(...) but validator fails -> Err pointing to Settings)
+        let invalid_store = MockEditorStore::with_editor("notepad.exe");
+        let res =
+            resolve_configured_editor(&invalid_store, |_| Err("path must be absolute".to_string()));
+        assert!(res.is_err(), "Invalid configured path must return Err");
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("Configured external editor 'notepad.exe' is invalid"),
+            "Error must specify invalid editor"
+        );
+        assert!(
+            err_msg.contains("Settings"),
+            "Error must point user to Settings"
+        );
+
+        // 3. No editor configured (store returns None -> Ok(None))
+        let empty_store = MockEditorStore::new();
+        let res = resolve_configured_editor(&empty_store, |_| Ok(()));
+        assert_eq!(res, Ok(None), "Empty editor store must return Ok(None)");
+
+        // 4. Valid editor (store returns Some(...) and validator succeeds -> Ok(Some(...)))
+        let valid_store = MockEditorStore::with_editor("/usr/bin/custom-editor");
+        let res = resolve_configured_editor(&valid_store, |_| Ok(()));
+        assert_eq!(res, Ok(Some("/usr/bin/custom-editor".to_string())));
+    }
+
+    #[test]
+    fn test_editor_launch_kind_all_os() {
+        let mac_app = Path::new("/Applications/Visual Studio Code.app");
+        let mac_bin = Path::new("/usr/local/bin/code");
+        let win_exe = Path::new(r"C:\Program Files\Notepad++\notepad++.exe");
+        let linux_bin = Path::new("/usr/bin/nano");
+
+        // macOS: .app directory launches via open -a
+        assert_eq!(
+            editor_launch_kind("macos", mac_app, true),
+            EditorLaunchKind::MacosOpenApp
+        );
+        // macOS: .app that is not a directory launches directly as executable
+        assert_eq!(
+            editor_launch_kind("macos", mac_app, false),
+            EditorLaunchKind::DirectExecutable
+        );
+        // macOS: plain binary launches directly as executable
+        assert_eq!(
+            editor_launch_kind("macos", mac_bin, false),
+            EditorLaunchKind::DirectExecutable
+        );
+        assert_eq!(
+            editor_launch_kind("macos", mac_bin, true),
+            EditorLaunchKind::DirectExecutable
+        );
+
+        // Windows: .exe launches directly as executable
+        assert_eq!(
+            editor_launch_kind("windows", win_exe, false),
+            EditorLaunchKind::DirectExecutable
+        );
+        assert_eq!(
+            editor_launch_kind("windows", win_exe, true),
+            EditorLaunchKind::DirectExecutable
+        );
+
+        // Linux: binary launches directly as executable
+        assert_eq!(
+            editor_launch_kind("linux", linux_bin, false),
+            EditorLaunchKind::DirectExecutable
+        );
+
+        // Other OS: launches directly as executable
+        assert_eq!(
+            editor_launch_kind("other", linux_bin, false),
+            EditorLaunchKind::DirectExecutable
+        );
+    }
+
+    #[test]
     fn test_edit_remote_file_uses_configured_editor_without_param() {
         let store = MockEditorStore::with_editor("/usr/bin/custom-editor");
         let configured = store.get().unwrap();
@@ -2267,19 +2448,8 @@ mod tests {
         let ed_path = Path::new(r"C:\Program Files\Notepad++\notepad++.exe");
         let temp_file = Path::new(r"C:\temp\file.txt");
         let cmd = build_configured_editor_command(ed_path, temp_file);
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(cmd.get_program(), "open");
-            let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
-            assert_eq!(args[0], "-a");
-            assert_eq!(args[1], ed_path.as_os_str());
-            assert_eq!(args[2], temp_file.as_os_str());
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(cmd.get_program(), ed_path.as_os_str());
-            let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
-            assert_eq!(args, vec![temp_file.as_os_str()]);
-        }
+        assert_eq!(cmd.get_program(), ed_path.as_os_str());
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(args, vec![temp_file.as_os_str()]);
     }
 }

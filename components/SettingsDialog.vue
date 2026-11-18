@@ -34,7 +34,9 @@ const fetchExternalEditor = async () => {
         editorError.value = ''
         externalEditorPath.value = await invoke<string | null>('get_external_editor')
     } catch (e: any) {
-        editorError.value = typeof e === 'string' ? e : (e?.message || 'Failed to load external editor')
+        externalEditorPath.value = null
+        editorError.value = ''
+        console.warn('[SettingsDialog] Failed to read external editor from keyring:', e)
     }
 }
 
