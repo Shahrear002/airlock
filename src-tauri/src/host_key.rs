@@ -24,6 +24,7 @@ pub struct HostKeyPrompt {
     pub port: u16,
     pub key_type: String,
     pub fingerprint: String,
+    pub existing_entries: Vec<(String, String)>,
     pub existing_fingerprints: Vec<String>,
 }
 
@@ -151,6 +152,7 @@ impl HostKeyVerifier {
                     port: self.port,
                     key_type,
                     fingerprint,
+                    existing_entries: Vec::new(),
                     existing_fingerprints: Vec::new(),
                 };
                 let decision = self.prompter.ask(prompt).await;
@@ -175,13 +177,22 @@ impl HostKeyVerifier {
                         return false;
                     }
                 };
+                let existing_entries: Vec<(String, String)> = existing
+                    .iter()
+                    .map(|e| (e.key_type.clone(), e.fingerprint.clone()))
+                    .collect();
+                let existing_fingerprints: Vec<String> = existing_entries
+                    .iter()
+                    .map(|(kt, fp)| format!("{} {}", kt, fp))
+                    .collect();
                 let prompt = HostKeyPrompt {
                     kind: HostKeyPromptKind::NewKeyType,
                     host: self.host.clone(),
                     port: self.port,
                     key_type,
                     fingerprint,
-                    existing_fingerprints: existing.iter().map(|e| e.fingerprint.clone()).collect(),
+                    existing_entries,
+                    existing_fingerprints,
                 };
                 let decision = self.prompter.ask(prompt).await;
                 match decision {
@@ -205,13 +216,22 @@ impl HostKeyVerifier {
                         return false;
                     }
                 };
+                let existing_entries: Vec<(String, String)> = existing
+                    .iter()
+                    .map(|e| (e.key_type.clone(), e.fingerprint.clone()))
+                    .collect();
+                let existing_fingerprints: Vec<String> = existing_entries
+                    .iter()
+                    .map(|(kt, fp)| format!("{} {}", kt, fp))
+                    .collect();
                 let prompt = HostKeyPrompt {
                     kind: HostKeyPromptKind::Changed,
                     host: self.host.clone(),
                     port: self.port,
                     key_type,
                     fingerprint,
-                    existing_fingerprints: existing.iter().map(|e| e.fingerprint.clone()).collect(),
+                    existing_entries,
+                    existing_fingerprints,
                 };
                 let decision = self.prompter.ask(prompt).await;
                 match decision {
@@ -340,6 +360,16 @@ mod tests {
             let prompts = prompter.recorded_prompts().await;
             assert_eq!(prompts.len(), 1);
             assert_eq!(prompts[0].kind, HostKeyPromptKind::Changed);
+            assert_eq!(prompts[0].existing_entries.len(), 1);
+            assert_eq!(prompts[0].existing_entries[0].0, "ssh-ed25519");
+            assert_eq!(
+                prompts[0].existing_entries[0].1,
+                format!("SHA256:{}", ed_pk1.fingerprint())
+            );
+            assert_eq!(
+                prompts[0].existing_fingerprints[0],
+                format!("ssh-ed25519 SHA256:{}", ed_pk1.fingerprint())
+            );
             // Old key still trusted
             assert_eq!(
                 store.check("example.com", 22, &ed_pk1).unwrap(),
@@ -382,7 +412,17 @@ mod tests {
             let prompts = prompter.recorded_prompts().await;
             assert_eq!(prompts.len(), 1);
             assert_eq!(prompts[0].kind, HostKeyPromptKind::NewKeyType);
+            assert_eq!(prompts[0].existing_entries.len(), 1);
+            assert_eq!(prompts[0].existing_entries[0].0, "ssh-ed25519");
+            assert_eq!(
+                prompts[0].existing_entries[0].1,
+                format!("SHA256:{}", ed_pk2.fingerprint())
+            );
             assert_eq!(prompts[0].existing_fingerprints.len(), 1);
+            assert_eq!(
+                prompts[0].existing_fingerprints[0],
+                format!("ssh-ed25519 SHA256:{}", ed_pk2.fingerprint())
+            );
             // Both ed_pk2 and rsa_pk are now trusted
             assert_eq!(
                 store.check("example.com", 22, &ed_pk2).unwrap(),
@@ -592,6 +632,14 @@ mod tests {
         let prompts = prompter.recorded_prompts().await;
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].kind, HostKeyPromptKind::Changed);
+        assert_eq!(prompts[0].existing_entries.len(), 1);
+        assert_eq!(
+            prompts[0].existing_fingerprints[0],
+            format!(
+                "ssh-ed25519 SHA256:{}",
+                server_kp1.clone_public_key().unwrap().fingerprint()
+            )
+        );
 
         // Original key is still in store
         assert_eq!(
@@ -641,6 +689,14 @@ mod tests {
         let prompts = prompter.recorded_prompts().await;
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].kind, HostKeyPromptKind::Changed);
+        assert_eq!(prompts[0].existing_entries.len(), 1);
+        assert_eq!(
+            prompts[0].existing_fingerprints[0],
+            format!(
+                "ssh-ed25519 SHA256:{}",
+                server_kp1.clone_public_key().unwrap().fingerprint()
+            )
+        );
 
         // Key 2 is now trusted
         assert_eq!(

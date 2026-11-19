@@ -2,6 +2,14 @@ use base64::Engine;
 use russh_keys::PublicKeyBase64;
 use std::path::{Path, PathBuf};
 
+static FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn acquire_file_lock() -> std::sync::MutexGuard<'static, ()> {
+    FILE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KnownHostEntry {
     pub host: String,
@@ -19,8 +27,18 @@ pub enum CheckResult {
     Changed(Vec<KnownHostEntry>),
 }
 
+/// Strips one pair of surrounding [ ] from an IPv6 literal (contains ':').
+pub fn normalize_host(host: &str) -> &str {
+    if host.starts_with('[') && host.ends_with(']') && host[1..host.len() - 1].contains(':') {
+        &host[1..host.len() - 1]
+    } else {
+        host
+    }
+}
+
 /// Refuses host names containing whitespace, control characters, or forbidden symbols.
 pub fn validate_host(host: &str) -> Result<(), String> {
+    let host = normalize_host(host);
     if host.is_empty() {
         return Err("Host name cannot be empty".to_string());
     }
@@ -35,6 +53,7 @@ pub fn validate_host(host: &str) -> Result<(), String> {
 /// Formats a host pattern for known_hosts (port 22 is bare host, other ports are [host]:port).
 /// Hosts are canonicalized to lowercase.
 pub fn format_host_pattern(host: &str, port: u16) -> Result<String, String> {
+    let host = normalize_host(host);
     validate_host(host)?;
     let h = host.to_ascii_lowercase();
     if port == 22 {
@@ -50,12 +69,17 @@ pub fn parse_host_pattern(pattern: &str) -> Option<(String, u16)> {
         if let Some(idx) = pattern.find("]:") {
             let h = pattern[1..idx].to_ascii_lowercase();
             let pt = pattern[idx + 2..].parse::<u16>().ok()?;
-            Some((h, pt))
+            Some((normalize_host(&h).to_string(), pt))
         } else {
-            None
+            let normalized = normalize_host(pattern);
+            if normalized != pattern {
+                Some((normalized.to_ascii_lowercase(), 22))
+            } else {
+                None
+            }
         }
     } else {
-        Some((pattern.to_ascii_lowercase(), 22))
+        Some((normalize_host(pattern).to_ascii_lowercase(), 22))
     }
 }
 
@@ -140,20 +164,18 @@ impl KnownHostsStore {
     }
 
     /// Reads all lines from the known_hosts file.
-    /// If the file does not exist, returns Ok(empty vec).
-    /// If the file exists but is unreadable or non-UTF-8, returns Err (fail-closed).
+    /// If the file does not exist (NotFound), returns Ok(empty vec).
+    /// If any other read error occurs (unreadable, non-UTF-8, etc.), returns Err (fail-closed).
     pub fn read_lines(&self) -> Result<Vec<String>, String> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&self.path).map_err(|e| {
-            format!(
+        match std::fs::read_to_string(&self.path) {
+            Ok(content) => Ok(content.lines().map(|s| s.to_string()).collect()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!(
                 "Failed to read known_hosts at '{}': {}",
                 self.path.display(),
                 e
-            )
-        })?;
-        Ok(content.lines().map(|s| s.to_string()).collect())
+            )),
+        }
     }
 
     /// Writes lines atomically via a temporary file in the same directory, then renames.
@@ -225,6 +247,7 @@ impl KnownHostsStore {
         port: u16,
         key: &russh_keys::key::PublicKey,
     ) -> Result<CheckResult, String> {
+        let host = normalize_host(host);
         validate_host(host)?;
         let (incoming_type, _incoming_fp, incoming_b64) = key_info(key)?;
         let target_pat = format_host_pattern(host, port)?;
@@ -274,6 +297,8 @@ impl KnownHostsStore {
         port: u16,
         key: &russh_keys::key::PublicKey,
     ) -> Result<(), String> {
+        let _guard = acquire_file_lock();
+        let host = normalize_host(host);
         validate_host(host)?;
         let (key_type, _fp, b64) = key_info(key)?;
         let target_pat = format_host_pattern(host, port)?;
@@ -303,6 +328,8 @@ impl KnownHostsStore {
         port: u16,
         key: &russh_keys::key::PublicKey,
     ) -> Result<(), String> {
+        let _guard = acquire_file_lock();
+        let host = normalize_host(host);
         validate_host(host)?;
         let (key_type, _fp, b64) = key_info(key)?;
         let target_pat = format_host_pattern(host, port)?;
@@ -337,6 +364,8 @@ impl KnownHostsStore {
     /// Removes a single host key entry identified by (host, port, fingerprint).
     /// Preserves all other entries for this host, other hosts, and unmanaged lines verbatim.
     pub fn remove(&self, host: &str, port: u16, fingerprint: &str) -> Result<(), String> {
+        let _guard = acquire_file_lock();
+        let host = normalize_host(host);
         validate_host(host)?;
         let target_pat = format_host_pattern(host, port)?;
         let lines = self.read_lines()?;
@@ -370,6 +399,7 @@ impl KnownHostsStore {
 
     /// Returns all managed entries for a specific host and port.
     pub fn entries_for_host(&self, host: &str, port: u16) -> Result<Vec<KnownHostEntry>, String> {
+        let host = normalize_host(host);
         validate_host(host)?;
         let target_pat = format_host_pattern(host, port)?;
         let all = self.list()?;
@@ -762,5 +792,176 @@ mod tests {
         let metadata = std::fs::metadata(&path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "known_hosts file mode must be 0600 on Unix");
+    }
+
+    #[test]
+    fn test_concurrent_adds_keep_every_entry() {
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let store = Arc::new(KnownHostsStore::new(&path));
+
+        let kp = gen_ed25519();
+        let pk = kp.clone_public_key().unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..24 {
+            let store = Arc::clone(&store);
+            let pk = pk.clone();
+            handles.push(std::thread::spawn(move || {
+                let host = format!("host{}.example.com", i);
+                store.add(&host, 22, &pk).unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 24, "All 24 entries must be present");
+        for i in 0..24 {
+            let expected_host = format!("host{}.example.com", i);
+            assert!(
+                entries.iter().any(|e| e.host == expected_host),
+                "Host {} must be present in known_hosts",
+                expected_host
+            );
+        }
+    }
+
+    #[test]
+    fn test_concurrent_add_and_remove_never_loses_unrelated_entries() {
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let store = Arc::new(KnownHostsStore::new(&path));
+
+        let kp = gen_ed25519();
+        let pk = kp.clone_public_key().unwrap();
+        let fp = format!("SHA256:{}", pk.fingerprint());
+
+        // Pre-populate with baseline entry
+        store.add("baseline.example.com", 22, &pk).unwrap();
+
+        let mut handles = Vec::new();
+        // 10 threads adding permanent hosts
+        for i in 0..10 {
+            let store = Arc::clone(&store);
+            let pk = pk.clone();
+            handles.push(std::thread::spawn(move || {
+                let host = format!("perm{}.example.com", i);
+                store.add(&host, 22, &pk).unwrap();
+            }));
+        }
+
+        // 10 threads adding and removing ephemeral hosts
+        for i in 0..10 {
+            let store = Arc::clone(&store);
+            let pk = pk.clone();
+            let fp = fp.clone();
+            handles.push(std::thread::spawn(move || {
+                let host = format!("ephemeral{}.example.com", i);
+                store.add(&host, 22, &pk).unwrap();
+                store.remove(&host, 22, &fp).unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let entries = store.list().unwrap();
+        // Baseline must still be present
+        assert!(
+            entries.iter().any(|e| e.host == "baseline.example.com"),
+            "Baseline host must be preserved"
+        );
+        // All permanent hosts must be present
+        for i in 0..10 {
+            let host = format!("perm{}.example.com", i);
+            assert!(
+                entries.iter().any(|e| e.host == host),
+                "Permanent host {} must be preserved",
+                host
+            );
+        }
+    }
+
+    #[test]
+    fn test_ipv6_bracketed_and_unbracketed_are_same_entry() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let store = KnownHostsStore::new(&path);
+
+        let kp = gen_ed25519();
+        let pk = kp.clone_public_key().unwrap();
+
+        // 1. Add as bracketed "[::1]" on port 22
+        store.add("[::1]", 22, &pk).unwrap();
+
+        // 2. Checking as unbracketed "::1" is Trusted
+        assert_eq!(store.check("::1", 22, &pk).unwrap(), CheckResult::Trusted);
+        // Checking as bracketed "[::1]" is also Trusted
+        assert_eq!(store.check("[::1]", 22, &pk).unwrap(), CheckResult::Trusted);
+
+        // 3. entries_for_host works with both forms
+        assert_eq!(store.entries_for_host("[::1]", 22).unwrap().len(), 1);
+        assert_eq!(store.entries_for_host("::1", 22).unwrap().len(), 1);
+
+        // 4. Non-standard port with [::1] and ::1
+        store.add("::1", 2222, &pk).unwrap();
+        assert_eq!(
+            store.check("[::1]", 2222, &pk).unwrap(),
+            CheckResult::Trusted
+        );
+        assert_eq!(store.check("::1", 2222, &pk).unwrap(), CheckResult::Trusted);
+
+        // 5. Remove using "[::1]" removes the entry for "::1"
+        let fp = format!("SHA256:{}", pk.fingerprint());
+        store.remove("[::1]", 22, &fp).unwrap();
+        assert_eq!(store.check("::1", 22, &pk).unwrap(), CheckResult::Unknown);
+        assert_eq!(store.check("[::1]", 22, &pk).unwrap(), CheckResult::Unknown);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_read_error_other_than_not_found_returns_err() {
+        use std::os::unix::fs::PermissionsExt;
+
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+
+        if unsafe { geteuid() } == 0 {
+            eprintln!("Skipping test: running as root");
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("unreadable_known_hosts");
+        std::fs::write(&path, "example.com ssh-ed25519 AAAAC...\n").unwrap();
+
+        let perms = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let store = KnownHostsStore::new(&path);
+        let kp = gen_ed25519();
+        let pk = kp.clone_public_key().unwrap();
+
+        assert!(
+            store.read_lines().is_err(),
+            "read_lines on unreadable file must return Err"
+        );
+        assert!(
+            store.check("example.com", 22, &pk).is_err(),
+            "check on unreadable file must return Err (fail closed)"
+        );
+        assert!(
+            store.list().is_err(),
+            "list on unreadable file must fail closed"
+        );
     }
 }

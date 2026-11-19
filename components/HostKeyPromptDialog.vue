@@ -200,15 +200,15 @@ const handleDialogClose = (open: boolean) => {
             <span class="font-mono" :class="settingsStore.appTheme === 'glass' ? 'text-[#E9EDF1]' : 'text-foreground'">{{ currentPrompt.key_type }}</span>
           </div>
 
-          <!-- Existing fingerprints on Changed or NewKeyType -->
+          <!-- Existing keys on Changed or NewKeyType -->
           <div v-if="currentPrompt.known && currentPrompt.known.length > 0" class="space-y-1.5 pt-1 border-t border-border/50">
-            <div class="text-[11px] font-sans text-amber-400 font-medium">Previously Trusted Fingerprint(s):</div>
+            <div class="text-[11px] font-sans text-amber-400 font-medium">Previously Trusted Key(s):</div>
             <div 
-                v-for="(fp, idx) in currentPrompt.known" 
+                v-for="(entry, idx) in currentPrompt.known" 
                 :key="idx" 
                 class="p-2 rounded bg-zinc-900 text-zinc-100 border border-zinc-800 font-mono text-[11px] break-all select-all"
             >
-              {{ fp }}
+              {{ entry }}
             </div>
           </div>
 
