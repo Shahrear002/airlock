@@ -13,13 +13,18 @@ import { ShieldCheck, AlertTriangle, Copy, Check, Server, KeyRound } from 'lucid
 import { useSettingsStore } from '~/stores/settings'
 
 interface HostKeyPrompt {
+    prompt_id: number
     session_id: string
+    kind: 'unknown' | 'new_key_type' | 'changed'
     host: string
     port: number
     key_type: string
     fingerprint: string
-    is_mismatch: boolean
-    existing_fingerprint?: string | null
+    known: string[]
+}
+
+interface HostKeyExpired {
+    prompt_id: number
 }
 
 const settingsStore = useSettingsStore()
@@ -32,6 +37,7 @@ const confirmReplace = ref(false)
 const isResponding = ref(false)
 
 let unlistenPrompt: UnlistenFn | null = null
+let unlistenExpired: UnlistenFn | null = null
 
 onMounted(async () => {
     unlistenPrompt = await listen<HostKeyPrompt>('ssh-host-key-prompt', (event) => {
@@ -41,16 +47,23 @@ onMounted(async () => {
             copied.value = false
             isOpen.value = true
         } else {
-            // Queue subsequent prompts if multiple simultaneous connections occur
             promptQueue.value.push(event.payload)
+        }
+    })
+
+    unlistenExpired = await listen<HostKeyExpired>('ssh-host-key-expired', (event) => {
+        const expiredId = event.payload.prompt_id
+        if (currentPrompt.value && currentPrompt.value.prompt_id === expiredId) {
+            nextPromptOrClose()
+        } else {
+            promptQueue.value = promptQueue.value.filter(p => p.prompt_id !== expiredId)
         }
     })
 })
 
 onBeforeUnmount(() => {
-    if (unlistenPrompt) {
-        unlistenPrompt()
-    }
+    if (unlistenPrompt) unlistenPrompt()
+    if (unlistenExpired) unlistenExpired()
 })
 
 const handleCopyFingerprint = async (text: string) => {
@@ -78,13 +91,13 @@ const nextPromptOrClose = () => {
     }
 }
 
-const handleDecision = async (decision: 'accept' | 'replace' | 'reject') => {
+const handleDecision = async (decision: 'trust' | 'reject') => {
     if (!currentPrompt.value || isResponding.value) return
     isResponding.value = true
 
     try {
         await invoke('respond_host_key', {
-            sessionId: currentPrompt.value.session_id,
+            promptId: currentPrompt.value.prompt_id,
             decision
         })
     } catch (err) {
@@ -97,7 +110,6 @@ const handleDecision = async (decision: 'accept' | 'replace' | 'reject') => {
 
 const handleDialogClose = (open: boolean) => {
     if (!open && currentPrompt.value) {
-        // If dismissed without choosing, reject to fail-safe terminate the connection
         handleDecision('reject')
     }
 }
@@ -109,41 +121,65 @@ const handleDialogClose = (open: boolean) => {
         class="sm:max-w-[540px] flex flex-col p-6 border shadow-2xl theme-glass dark"
         :class="[
             settingsStore.appTheme === 'glass' ? '!bg-[#0A0D14]/95 !border-white/10 !text-[#E9EDF1] shadow-[0_0_80px_rgba(0,0,0,0.85)]' : 'bg-background border-border text-foreground',
-            currentPrompt?.is_mismatch ? '!border-red-500/50' : ''
+            currentPrompt?.kind === 'changed' ? '!border-red-500/50' : (currentPrompt?.kind === 'new_key_type' ? '!border-amber-500/50' : '')
         ]"
     >
       <DialogHeader>
         <div class="flex items-center gap-3">
           <div 
               class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border"
-              :class="currentPrompt?.is_mismatch ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-[#2D8CFF]/10 border-[#2D8CFF]/30 text-[#2D8CFF]'"
+              :class="[
+                  currentPrompt?.kind === 'changed' ? 'bg-red-500/10 border-red-500/30 text-red-400' :
+                  (currentPrompt?.kind === 'new_key_type' ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' : 'bg-[#2D8CFF]/10 border-[#2D8CFF]/30 text-[#2D8CFF]')
+              ]"
           >
-            <AlertTriangle v-if="currentPrompt?.is_mismatch" class="w-5 h-5 animate-pulse" />
+            <AlertTriangle v-if="currentPrompt?.kind === 'changed' || currentPrompt?.kind === 'new_key_type'" class="w-5 h-5 animate-pulse" />
             <ShieldCheck v-else class="w-5 h-5" />
           </div>
           <div class="flex-1">
-            <DialogTitle class="text-base font-semibold tracking-tight" :class="currentPrompt?.is_mismatch ? 'text-red-400' : (settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]' : '')">
-              {{ currentPrompt?.is_mismatch ? 'WARNING: Host Key Mismatch!' : 'Unknown SSH Host Key' }}
+            <DialogTitle 
+                class="text-base font-semibold tracking-tight" 
+                :class="[
+                    currentPrompt?.kind === 'changed' ? 'text-red-400' : 
+                    (currentPrompt?.kind === 'new_key_type' ? 'text-amber-400' : 
+                    (settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]' : ''))
+                ]"
+            >
+              <template v-if="currentPrompt?.kind === 'changed'">WARNING: Host Key Mismatch!</template>
+              <template v-else-if="currentPrompt?.kind === 'new_key_type'">Warning: New Key Type for Known Host</template>
+              <template v-else>Unknown SSH Host Key</template>
             </DialogTitle>
             <DialogDescription class="text-xs mt-0.5" :class="settingsStore.appTheme === 'glass' ? '!text-[#E9EDF1]/60' : 'text-muted-foreground'">
-              {{ currentPrompt?.is_mismatch ? 'Possible Man-in-the-Middle Attack Detected' : 'Trust on First Use (TOFU) Verification' }}
+              <template v-if="currentPrompt?.kind === 'changed'">Possible Man-in-the-Middle Attack Detected</template>
+              <template v-else-if="currentPrompt?.kind === 'new_key_type'">Additional Key Type Detected</template>
+              <template v-else>Trust on First Use (TOFU) Verification</template>
             </DialogDescription>
           </div>
         </div>
       </DialogHeader>
 
       <div v-if="currentPrompt" class="space-y-4 py-2 text-sm">
-        <!-- Mismatch Critical Warning Box -->
+        <!-- Changed Key (Mismatch) Critical Banner -->
         <div 
-            v-if="currentPrompt.is_mismatch" 
+            v-if="currentPrompt.kind === 'changed'" 
             class="p-3.5 rounded-lg border border-red-500/30 bg-red-500/10 text-xs leading-relaxed text-red-200"
         >
           <span class="font-bold text-red-300">POTENTIAL SECURITY BREACH:</span>
-          The host key presented by the remote server does not match the key previously stored in your known hosts. 
+          The host key presented by the remote server does not match the key previously stored in your known hosts for this algorithm. 
           Someone could be intercepting your connection, or the server's administrator may have regenerated the key.
         </div>
 
-        <!-- Normal TOFU description -->
+        <!-- New Key Type Warning Banner -->
+        <div 
+            v-else-if="currentPrompt.kind === 'new_key_type'" 
+            class="p-3.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs leading-relaxed text-amber-200"
+        >
+          <span class="font-bold text-amber-300">ADDITIONAL KEY TYPE:</span>
+          This host is already known under a different algorithm, but is now presenting an additional key type (<code class="font-mono text-amber-100">{{ currentPrompt.key_type }}</code>).
+          Verify the presented fingerprint before trusting it.
+        </div>
+
+        <!-- Neutral TOFU Description -->
         <p v-else class="text-xs leading-relaxed" :class="settingsStore.appTheme === 'glass' ? 'text-white/70' : 'text-muted-foreground'">
           The authenticity of host <code class="px-1.5 py-0.5 rounded font-mono text-[#2D8CFF] bg-[#2D8CFF]/10 border border-[#2D8CFF]/20">{{ currentPrompt.host }}:{{ currentPrompt.port }}</code> cannot be established.
           Verify the key fingerprint below before connecting.
@@ -156,27 +192,31 @@ const handleDialogClose = (open: boolean) => {
         >
           <div class="flex items-center justify-between text-[11px] text-muted-foreground font-sans">
             <span class="flex items-center gap-1.5"><Server class="w-3.5 h-3.5" /> Target Server</span>
-            <span class="font-mono text-foreground font-semibold">{{ currentPrompt.host }}:{{ currentPrompt.port }}</span>
+            <span class="font-mono font-semibold" :class="settingsStore.appTheme === 'glass' ? 'text-[#E9EDF1]' : 'text-foreground'">{{ currentPrompt.host }}:{{ currentPrompt.port }}</span>
           </div>
 
           <div class="flex items-center justify-between text-[11px] text-muted-foreground font-sans">
             <span class="flex items-center gap-1.5"><KeyRound class="w-3.5 h-3.5" /> Key Algorithm</span>
-            <span class="font-mono text-foreground">{{ currentPrompt.key_type }}</span>
+            <span class="font-mono" :class="settingsStore.appTheme === 'glass' ? 'text-[#E9EDF1]' : 'text-foreground'">{{ currentPrompt.key_type }}</span>
           </div>
 
-          <!-- Existing fingerprint on mismatch -->
-          <div v-if="currentPrompt.is_mismatch && currentPrompt.existing_fingerprint" class="space-y-1 pt-1 border-t border-border/50">
-            <div class="text-[11px] font-sans text-amber-400 font-medium">Previously Trusted Fingerprint:</div>
-            <div class="p-2 rounded bg-black/30 border border-white/5 font-mono text-[11px] text-amber-200/90 break-all select-all">
-              {{ currentPrompt.existing_fingerprint }}
+          <!-- Existing fingerprints on Changed or NewKeyType -->
+          <div v-if="currentPrompt.known && currentPrompt.known.length > 0" class="space-y-1.5 pt-1 border-t border-border/50">
+            <div class="text-[11px] font-sans text-amber-400 font-medium">Previously Trusted Fingerprint(s):</div>
+            <div 
+                v-for="(fp, idx) in currentPrompt.known" 
+                :key="idx" 
+                class="p-2 rounded bg-zinc-900 text-zinc-100 border border-zinc-800 font-mono text-[11px] break-all select-all"
+            >
+              {{ fp }}
             </div>
           </div>
 
-          <!-- Current Fingerprint -->
+          <!-- Current Presented Fingerprint -->
           <div class="space-y-1 pt-1 border-t border-border/50">
             <div class="flex items-center justify-between text-[11px] font-sans text-muted-foreground">
-              <span :class="currentPrompt.is_mismatch ? 'text-red-400 font-semibold' : ''">
-                {{ currentPrompt.is_mismatch ? 'New Presented Fingerprint:' : 'Server Fingerprint (SHA-256):' }}
+              <span :class="currentPrompt.kind === 'changed' ? 'text-red-400 font-semibold' : (currentPrompt.kind === 'new_key_type' ? 'text-amber-400 font-semibold' : '')">
+                {{ currentPrompt.kind === 'changed' ? 'New Presented Fingerprint:' : (currentPrompt.kind === 'new_key_type' ? 'New Presented Fingerprint:' : 'Server Fingerprint (SHA-256):') }}
               </span>
               <button 
                   @click="handleCopyFingerprint(currentPrompt.fingerprint)" 
@@ -190,16 +230,16 @@ const handleDialogClose = (open: boolean) => {
               </button>
             </div>
             <div 
-                class="p-2 rounded bg-black/40 border font-mono text-[11px] break-all select-all"
-                :class="currentPrompt.is_mismatch ? 'border-red-500/40 text-red-200 bg-red-950/20' : 'border-white/10 text-foreground'"
+                class="p-2 rounded bg-zinc-900 text-zinc-100 border border-zinc-800 font-mono text-[11px] break-all select-all"
+                :class="currentPrompt.kind === 'changed' ? '!border-red-500/40' : (currentPrompt.kind === 'new_key_type' ? '!border-amber-500/40' : '')"
             >
               {{ currentPrompt.fingerprint }}
             </div>
           </div>
         </div>
 
-        <!-- Mismatch confirmation checkbox -->
-        <div v-if="currentPrompt.is_mismatch" class="flex items-start gap-2 pt-1">
+        <!-- Mismatch confirmation checkbox (changed kind only) -->
+        <div v-if="currentPrompt.kind === 'changed'" class="flex items-start gap-2 pt-1">
           <input 
               type="checkbox" 
               id="confirm-replace-key" 
@@ -221,15 +261,15 @@ const handleDialogClose = (open: boolean) => {
             class="text-xs"
             :class="settingsStore.appTheme === 'glass' ? '!bg-transparent !border-white/10 hover:!bg-white/10 !text-white' : ''"
         >
-          {{ currentPrompt?.is_mismatch ? 'Abort Connection (Recommended)' : 'Cancel' }}
+          {{ currentPrompt?.kind === 'changed' ? 'Abort Connection (Recommended)' : 'Cancel' }}
         </Button>
 
         <!-- Acceptance / Replace -->
         <div class="flex items-center gap-2">
           <Button 
-              v-if="currentPrompt?.is_mismatch" 
+              v-if="currentPrompt?.kind === 'changed'" 
               variant="destructive"
-              @click="handleDecision('replace')" 
+              @click="handleDecision('trust')" 
               :disabled="!confirmReplace || isResponding"
               class="text-xs bg-red-600 hover:bg-red-700 text-white"
           >
@@ -237,8 +277,17 @@ const handleDialogClose = (open: boolean) => {
           </Button>
 
           <Button 
+              v-else-if="currentPrompt?.kind === 'new_key_type'"
+              @click="handleDecision('trust')" 
+              :disabled="isResponding"
+              class="text-xs bg-amber-600 hover:bg-amber-700 text-white"
+          >
+            Trust New Key Type
+          </Button>
+
+          <Button 
               v-else 
-              @click="handleDecision('accept')" 
+              @click="handleDecision('trust')" 
               :disabled="isResponding"
               class="text-xs"
               :class="settingsStore.appTheme === 'glass' ? 'btn-primary' : 'bg-primary text-primary-foreground'"

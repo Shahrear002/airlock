@@ -22,38 +22,16 @@ pub struct ActiveSession {
     pub terminal_tx: Option<mpsc::UnboundedSender<SshInput>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostKeyDecision {
-    Accept,
-    Replace,
-    Reject,
-}
-
-#[derive(Clone, serde::Serialize)]
-pub struct HostKeyPromptPayload {
+pub struct PendingPrompt {
     pub session_id: String,
-    pub host: String,
-    pub port: u16,
-    pub key_type: String,
-    pub fingerprint: String,
-    pub is_mismatch: bool,
-    pub existing_fingerprint: Option<String>,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct KnownHostItem {
-    pub host: String,
-    pub port: u16,
-    pub key_type: String,
-    pub fingerprint: String,
+    pub sender: tokio::sync::oneshot::Sender<crate::host_key::HostKeyDecision>,
 }
 
 // Global state to manage active connections
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, ActiveSession>>>,
     pub active_transfers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    pub host_key_prompts:
-        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HostKeyDecision>>>>,
+    pub host_key_prompts: Arc<Mutex<HashMap<u64, PendingPrompt>>>,
     pub editor_store: Arc<dyn crate::sftp::EditorStore>,
 }
 
@@ -78,130 +56,111 @@ impl AppState {
     }
 }
 
-pub fn get_known_hosts_path(app: &tauri::AppHandle) -> std::path::PathBuf {
-    let base_dir = app.path().app_data_dir().unwrap_or_else(|_| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
-    let _ = std::fs::create_dir_all(&base_dir);
-    base_dir.join("known_hosts")
+pub fn get_known_hosts_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let base_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
+    std::fs::create_dir_all(&base_dir)
+        .map_err(|e| format!("Failed to create app data directory: {}", e))?;
+    Ok(base_dir.join("known_hosts"))
 }
 
-pub fn remove_known_host_entry<P: AsRef<std::path::Path>>(
-    path: P,
-    host: &str,
-    port: u16,
-) -> Result<(), std::io::Error> {
-    let p = path.as_ref();
-    if !p.exists() {
-        return Ok(());
-    }
-    let content = std::fs::read_to_string(p)?;
-    let target_prefix = if port == 22 {
-        format!("{} ", host)
-    } else {
-        format!("[{}]:{} ", host, port)
-    };
-    let target_prefix_comma = if port == 22 {
-        format!("{},", host)
-    } else {
-        format!("[{}]:{},", host, port)
-    };
+static NEXT_PROMPT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-    let new_lines: Vec<&str> = content
-        .lines()
-        .filter(|line| {
-            let l = line.trim();
-            if l.is_empty() || l.starts_with('#') {
-                return true;
-            }
-            !l.starts_with(&target_prefix) && !l.starts_with(&target_prefix_comma)
-        })
-        .collect();
-
-    let mut output = new_lines.join("\n");
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    std::fs::write(p, output)?;
-    Ok(())
+pub struct TauriPrompter {
+    pub app_handle: tauri::AppHandle,
+    pub session_id: String,
 }
 
-pub fn list_known_hosts<P: AsRef<std::path::Path>>(
-    path: P,
-) -> Result<Vec<KnownHostItem>, std::io::Error> {
-    let p = path.as_ref();
-    if !p.exists() {
-        return Ok(vec![]);
-    }
-    let content = std::fs::read_to_string(p)?;
-    let mut items = Vec::new();
+#[async_trait]
+impl crate::host_key::HostKeyPrompter for TauriPrompter {
+    async fn ask(
+        &self,
+        prompt: crate::host_key::HostKeyPrompt,
+    ) -> crate::host_key::HostKeyDecision {
+        let prompt_id = NEXT_PROMPT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
+        {
+            let state = self.app_handle.state::<AppState>();
+            let mut prompts = state.host_key_prompts.lock().await;
+            prompts.insert(
+                prompt_id,
+                PendingPrompt {
+                    session_id: self.session_id.clone(),
+                    sender: tx,
+                },
+            );
         }
-        let mut parts = trimmed.split_whitespace();
-        let Some(host_part) = parts.next() else {
-            continue;
-        };
-        let Some(key_type) = parts.next() else {
-            continue;
-        };
-        let Some(b64_key) = parts.next() else {
-            continue;
+
+        let payload = serde_json::json!({
+            "prompt_id": prompt_id,
+            "session_id": self.session_id,
+            "kind": match prompt.kind {
+                crate::host_key::HostKeyPromptKind::Unknown => "unknown",
+                crate::host_key::HostKeyPromptKind::NewKeyType => "new_key_type",
+                crate::host_key::HostKeyPromptKind::Changed => "changed",
+            },
+            "host": prompt.host,
+            "port": prompt.port,
+            "key_type": prompt.key_type,
+            "fingerprint": prompt.fingerprint,
+            "known": prompt.existing_fingerprints,
+        });
+
+        let _ = self.app_handle.emit("ssh-host-key-prompt", payload);
+
+        // 120s timeout
+        let decision_res = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
+
+        // On timeout OR cancellation, remove the entry and emit ssh-host-key-expired { prompt_id }
+        let state = self.app_handle.state::<AppState>();
+        let was_removed = {
+            let mut prompts = state.host_key_prompts.lock().await;
+            prompts.remove(&prompt_id).is_some()
         };
 
-        let (host, port) = if host_part.starts_with('[') {
-            if let Some(idx) = host_part.find("]:") {
-                let h = &host_part[1..idx];
-                let pt = host_part[idx + 2..].parse::<u16>().unwrap_or(22);
-                (h.to_string(), pt)
-            } else {
-                (host_part.to_string(), 22)
-            }
-        } else {
-            (host_part.to_string(), 22)
-        };
+        if was_removed {
+            let _ = self.app_handle.emit(
+                "ssh-host-key-expired",
+                serde_json::json!({ "prompt_id": prompt_id }),
+            );
+        }
 
-        if let Ok(pubkey) = russh_keys::parse_public_key_base64(b64_key) {
-            let fingerprint = format!("SHA256:{}", pubkey.fingerprint());
-            items.push(KnownHostItem {
-                host,
-                port,
-                key_type: key_type.to_string(),
-                fingerprint,
-            });
+        match decision_res {
+            Ok(Ok(decision)) => decision,
+            _ => crate::host_key::HostKeyDecision::Reject,
         }
     }
-
-    Ok(items)
 }
 
 #[tauri::command]
 pub async fn respond_host_key(
     state: tauri::State<'_, AppState>,
-    session_id: String,
+    prompt_id: u64,
     decision: String,
 ) -> Result<(), String> {
     let mut prompts = state.host_key_prompts.lock().await;
-    if let Some(tx) = prompts.remove(&session_id) {
+    if let Some(pending) = prompts.remove(&prompt_id) {
         let dec = match decision.as_str() {
-            "accept" => HostKeyDecision::Accept,
-            "replace" => HostKeyDecision::Replace,
-            _ => HostKeyDecision::Reject,
+            "trust" | "accept" | "replace" => crate::host_key::HostKeyDecision::Trust,
+            _ => crate::host_key::HostKeyDecision::Reject,
         };
-        let _ = tx.send(dec);
+        let _ = pending.sender.send(dec);
         Ok(())
     } else {
-        Err("No pending host key prompt for this session".into())
+        Err("No pending host key prompt with this ID".into())
     }
 }
 
 #[tauri::command]
-pub async fn get_known_hosts(app: tauri::AppHandle) -> Result<Vec<KnownHostItem>, String> {
-    let path = get_known_hosts_path(&app);
-    list_known_hosts(path).map_err(|e| e.to_string())
+pub async fn get_known_hosts(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::known_hosts::KnownHostEntry>, String> {
+    let path = get_known_hosts_path(&app)?;
+    let store = crate::known_hosts::KnownHostsStore::new(path);
+    store.list()
 }
 
 #[tauri::command]
@@ -209,19 +168,17 @@ pub async fn remove_known_host(
     app: tauri::AppHandle,
     host: String,
     port: u16,
+    fingerprint: String,
 ) -> Result<(), String> {
-    let path = get_known_hosts_path(&app);
-    remove_known_host_entry(&path, &host, port).map_err(|e| e.to_string())
+    let path = get_known_hosts_path(&app)?;
+    let store = crate::known_hosts::KnownHostsStore::new(path);
+    store.remove(&host, port, &fingerprint)
 }
 
 // Russh Client Handler
 #[derive(Clone)]
 pub struct Client {
-    pub session_id: String,
-    pub host: String,
-    pub port: u16,
-    pub known_hosts_path: std::path::PathBuf,
-    pub app_handle: tauri::AppHandle,
+    pub verifier: Arc<crate::host_key::HostKeyVerifier>,
 }
 
 #[async_trait]
@@ -232,163 +189,8 @@ impl client::Handler for Client {
         &mut self,
         server_public_key: &key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        let check = russh_keys::check_known_hosts_path(
-            &self.host,
-            self.port,
-            server_public_key,
-            &self.known_hosts_path,
-        );
-        match check {
-            Ok(true) => {
-                log::info!(
-                    "SSH host key verified from known_hosts for {}:{}",
-                    self.host,
-                    self.port
-                );
-                Ok(true)
-            }
-            Ok(false) => {
-                // Unknown host key: Trust-On-First-Use (TOFU) flow
-                let fingerprint = format!("SHA256:{}", server_public_key.fingerprint());
-                let key_type = server_public_key.name().to_string();
-                log::warn!(
-                    "Unknown SSH host key for {}:{} ({}) - requesting TOFU confirmation",
-                    self.host,
-                    self.port,
-                    fingerprint
-                );
-
-                let (tx, rx) = tokio::sync::oneshot::channel::<HostKeyDecision>();
-                {
-                    let state = self.app_handle.state::<AppState>();
-                    let mut prompts = state.host_key_prompts.lock().await;
-                    prompts.insert(self.session_id.clone(), tx);
-                }
-
-                let payload = HostKeyPromptPayload {
-                    session_id: self.session_id.clone(),
-                    host: self.host.clone(),
-                    port: self.port,
-                    key_type,
-                    fingerprint,
-                    is_mismatch: false,
-                    existing_fingerprint: None,
-                };
-
-                let _ = self.app_handle.emit("ssh-host-key-prompt", payload);
-
-                // Wait up to 60 seconds for user confirmation
-                let decision =
-                    match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-                        Ok(Ok(d)) => d,
-                        _ => HostKeyDecision::Reject,
-                    };
-
-                match decision {
-                    HostKeyDecision::Accept | HostKeyDecision::Replace => {
-                        let _ = russh_keys::learn_known_hosts_path(
-                            &self.host,
-                            self.port,
-                            server_public_key,
-                            &self.known_hosts_path,
-                        );
-                        log::info!(
-                            "Learned trusted SSH host key for {}:{}",
-                            self.host,
-                            self.port
-                        );
-                        Ok(true)
-                    }
-                    HostKeyDecision::Reject => {
-                        log::warn!(
-                            "User rejected unknown SSH host key for {}:{}",
-                            self.host,
-                            self.port
-                        );
-                        Ok(false)
-                    }
-                }
-            }
-            Err(russh_keys::Error::KeyChanged { line }) => {
-                // Host key MISMATCH: potential Man-in-the-Middle attack
-                let fingerprint = format!("SHA256:{}", server_public_key.fingerprint());
-                let key_type = server_public_key.name().to_string();
-                let existing_keys =
-                    russh_keys::known_host_keys_path(&self.host, self.port, &self.known_hosts_path)
-                        .unwrap_or_default();
-                let existing_fp = existing_keys
-                    .first()
-                    .map(|(_, k)| format!("SHA256:{}", k.fingerprint()));
-
-                log::error!(
-                    "CRITICAL: SSH host key mismatch detected for {}:{} at line {}",
-                    self.host,
-                    self.port,
-                    line
-                );
-
-                let (tx, rx) = tokio::sync::oneshot::channel::<HostKeyDecision>();
-                {
-                    let state = self.app_handle.state::<AppState>();
-                    let mut prompts = state.host_key_prompts.lock().await;
-                    prompts.insert(self.session_id.clone(), tx);
-                }
-
-                let payload = HostKeyPromptPayload {
-                    session_id: self.session_id.clone(),
-                    host: self.host.clone(),
-                    port: self.port,
-                    key_type,
-                    fingerprint,
-                    is_mismatch: true,
-                    existing_fingerprint: existing_fp,
-                };
-
-                let _ = self.app_handle.emit("ssh-host-key-prompt", payload);
-
-                let decision =
-                    match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-                        Ok(Ok(d)) => d,
-                        _ => HostKeyDecision::Reject,
-                    };
-
-                match decision {
-                    HostKeyDecision::Replace => {
-                        let _ =
-                            remove_known_host_entry(&self.known_hosts_path, &self.host, self.port);
-                        let _ = russh_keys::learn_known_hosts_path(
-                            &self.host,
-                            self.port,
-                            server_public_key,
-                            &self.known_hosts_path,
-                        );
-                        log::info!(
-                            "Replaced SSH host key for {}:{} in known_hosts",
-                            self.host,
-                            self.port
-                        );
-                        Ok(true)
-                    }
-                    _ => {
-                        log::warn!(
-                            "Connection aborted due to SSH host key mismatch for {}:{}",
-                            self.host,
-                            self.port
-                        );
-                        Ok(false)
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!(
-                    "Error reading known_hosts for {}:{}: {}",
-                    self.host,
-                    self.port,
-                    e
-                );
-                Ok(false)
-            }
-        }
+        let ok = self.verifier.verify(server_public_key).await;
+        Ok(ok)
     }
 }
 
@@ -402,22 +204,52 @@ pub async fn connect_and_stream(
     rows: u32,
     app_handle: tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = client::Config::default();
-    let config = Arc::new(config);
-    let known_hosts_path = get_known_hosts_path(&app_handle);
-    let sh = Client {
-        session_id: id.clone(),
-        host: host.clone(),
-        port,
-        known_hosts_path,
+    let known_hosts_path = get_known_hosts_path(&app_handle)?;
+    let store = Arc::new(crate::known_hosts::KnownHostsStore::new(known_hosts_path));
+    let prompter = Arc::new(TauriPrompter {
         app_handle: app_handle.clone(),
+        session_id: id.clone(),
+    });
+    let verifier = Arc::new(crate::host_key::HostKeyVerifier::new(
+        store,
+        prompter,
+        host.clone(),
+        port,
+    ));
+
+    let mut config = client::Config::default();
+    config.preferred.key = std::borrow::Cow::Owned(verifier.preferred_algorithms());
+    let config = Arc::new(config);
+
+    let sh = Client {
+        verifier: verifier.clone(),
     };
 
-    let mut session = client::connect(config, (host.as_str(), port), sh).await?;
+    let friendly_unknown_key_msg = |v: &crate::host_key::HostKeyVerifier| -> String {
+        if let Some(fail) = v.take_failure() {
+            fail
+        } else {
+            "Host key verification failed: the connection was cancelled because the server's identity was not confirmed.".to_string()
+        }
+    };
+
+    let mut session = match client::connect(config, (host.as_str(), port), sh).await {
+        Ok(s) => s,
+        Err(russh::Error::UnknownKey) => {
+            return Err(friendly_unknown_key_msg(&verifier).into());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Auth
     let auth_res = if let Some(pwd) = password {
-        session.authenticate_password(&user, pwd).await?
+        match session.authenticate_password(&user, pwd).await {
+            Ok(res) => res,
+            Err(russh::Error::UnknownKey) => {
+                return Err(friendly_unknown_key_msg(&verifier).into());
+            }
+            Err(e) => return Err(e.into()),
+        }
     } else {
         return Err("Only password auth supported in this step".into());
     };
@@ -434,7 +266,6 @@ pub async fn connect_and_stream(
     channel.request_shell(false).await?;
 
     // Create channel for input from Frontend -> SSH
-    // CHANGED: Use SshInput enum
     let (tx, mut rx) = mpsc::unbounded_channel::<SshInput>();
 
     // Store the sender in AppState
@@ -512,9 +343,11 @@ mod tests {
     fn test_known_hosts_lifecycle() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
+        let store = crate::known_hosts::KnownHostsStore::new(&path);
 
         let kp1 = key::KeyPair::generate_ed25519().unwrap();
         let pk1 = kp1.clone_public_key().unwrap();
+        let fp1 = format!("SHA256:{}", pk1.fingerprint());
 
         let kp2 = key::KeyPair::generate_ed25519().unwrap();
         let pk2 = kp2.clone_public_key().unwrap();
@@ -522,48 +355,53 @@ mod tests {
         let host = "192.168.1.100";
         let port = 22;
 
-        // 1. Initial check on non-existent file -> Unknown host (false)
-        let res = russh_keys::check_known_hosts_path(host, port, &pk1, &path).unwrap();
-        assert!(!res, "Unknown host must return false (triggering TOFU)");
+        // 1. Initial check on non-existent file -> Unknown
+        assert_eq!(
+            store.check(host, port, &pk1).unwrap(),
+            crate::known_hosts::CheckResult::Unknown
+        );
 
-        // 2. Learn key -> writes to known_hosts
-        russh_keys::learn_known_hosts_path(host, port, &pk1, &path).unwrap();
+        // 2. Add key -> writes to known_hosts
+        store.add(host, port, &pk1).unwrap();
 
-        // 3. Check again with same key -> Match (true)
-        let res = russh_keys::check_known_hosts_path(host, port, &pk1, &path).unwrap();
-        assert!(res, "Known host with matching key must return true");
+        // 3. Check again with same key -> Trusted
+        assert_eq!(
+            store.check(host, port, &pk1).unwrap(),
+            crate::known_hosts::CheckResult::Trusted
+        );
 
-        // 4. Check with different key for same host and algorithm -> KeyChanged error (mismatch)
-        let res = russh_keys::check_known_hosts_path(host, port, &pk2, &path);
-        match res {
-            Err(russh_keys::Error::KeyChanged { line }) => {
-                assert!(line >= 1, "Mismatch must pinpoint the changed line");
+        // 4. Check with different key of same type -> Changed
+        match store.check(host, port, &pk2).unwrap() {
+            crate::known_hosts::CheckResult::Changed(existing) => {
+                assert_eq!(existing.len(), 1);
+                assert_eq!(existing[0].fingerprint, fp1);
             }
-            other => panic!("Expected KeyChanged error on key mismatch, got {:?}", other),
+            other => panic!("Expected Changed, got {:?}", other),
         }
 
-        // 5. Port distinction: different port on same host is treated as unknown host
-        let res = russh_keys::check_known_hosts_path(host, 2222, &pk1, &path).unwrap();
-        assert!(
-            !res,
-            "Different port must be treated as a distinct host entry"
+        // 5. Port distinction: different port on same host is Unknown
+        assert_eq!(
+            store.check(host, 2222, &pk1).unwrap(),
+            crate::known_hosts::CheckResult::Unknown
         );
 
         // 6. List known hosts
-        let entries = list_known_hosts(&path).unwrap();
+        let entries = store.list().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].host, host);
         assert_eq!(entries[0].port, port);
         assert_eq!(entries[0].key_type, "ssh-ed25519");
-        assert!(entries[0].fingerprint.starts_with("SHA256:"));
+        assert_eq!(entries[0].fingerprint, fp1);
 
-        // 7. Remove known host entry
-        remove_known_host_entry(&path, host, port).unwrap();
-        let entries = list_known_hosts(&path).unwrap();
+        // 7. Remove known host entry by fingerprint
+        store.remove(host, port, &fp1).unwrap();
+        let entries = store.list().unwrap();
         assert_eq!(entries.len(), 0, "Host entry must be removed");
 
         // 8. Host is now unknown again
-        let res = russh_keys::check_known_hosts_path(host, port, &pk1, &path).unwrap();
-        assert!(!res, "Removed host must return false (unknown)");
+        assert_eq!(
+            store.check(host, port, &pk1).unwrap(),
+            crate::known_hosts::CheckResult::Unknown
+        );
     }
 }

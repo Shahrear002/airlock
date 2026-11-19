@@ -123,9 +123,9 @@ const fetchKnownHosts = async () => {
     }
 }
 
-const handleRemoveKnownHost = async (host: string, port: number) => {
+const handleRemoveKnownHost = async (host: string, port: number, fingerprint: string) => {
     try {
-        await invoke('remove_known_host', { host, port })
+        await invoke('remove_known_host', { host, port, fingerprint })
         await fetchKnownHosts()
     } catch (e: any) {
         hostKeyError.value = typeof e === 'string' ? e : (e?.message || 'Failed to remove host key')
@@ -380,7 +380,7 @@ const reset = () => {
           <div v-else class="space-y-2 max-h-48 overflow-y-auto pr-1">
             <div 
                 v-for="item in knownHosts" 
-                :key="`${item.host}:${item.port}`"
+                :key="`${item.host}:${item.port}:${item.fingerprint}`"
                 class="flex items-center justify-between p-2.5 rounded-md border text-xs transition-colors"
                 :class="settingsStore.appTheme === 'glass' ? 'bg-white/[0.02] border-white/10 hover:bg-white/[0.05]' : 'bg-background border-border'"
             >
@@ -404,7 +404,7 @@ const reset = () => {
                 </div>
               </div>
               <button 
-                  @click="handleRemoveKnownHost(item.host, item.port)" 
+                  @click="handleRemoveKnownHost(item.host, item.port, item.fingerprint)" 
                   class="p-1.5 rounded text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors shrink-0"
                   title="Remove host key"
               >

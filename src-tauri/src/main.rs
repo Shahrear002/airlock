@@ -67,13 +67,38 @@ async fn send_ssh_input(
 }
 
 #[tauri::command]
-async fn disconnect_ssh(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut connections = state.connections.lock().await;
-    if connections.remove(&id).is_some() {
-        Ok(())
-    } else {
-        Err("Session not found".into())
+async fn disconnect_ssh(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let cancelled_prompt_ids: Vec<u64> = {
+        let mut prompts = state.host_key_prompts.lock().await;
+        let matching_ids: Vec<u64> = prompts
+            .iter()
+            .filter(|(_, p)| p.session_id == id)
+            .map(|(pid, _)| *pid)
+            .collect();
+        for pid in &matching_ids {
+            if let Some(pending) = prompts.remove(pid) {
+                let _ = pending
+                    .sender
+                    .send(crate::host_key::HostKeyDecision::Reject);
+            }
+        }
+        matching_ids
+    };
+
+    for pid in cancelled_prompt_ids {
+        let _ = app.emit(
+            "ssh-host-key-expired",
+            serde_json::json!({ "prompt_id": pid }),
+        );
     }
+
+    let mut connections = state.connections.lock().await;
+    let _ = connections.remove(&id);
+    Ok(())
 }
 
 #[tauri::command]
