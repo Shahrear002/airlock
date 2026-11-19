@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod host_key;
+pub mod known_hosts;
 mod sftp;
 mod ssh_session;
 mod vpn;
