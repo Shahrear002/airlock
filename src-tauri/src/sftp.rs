@@ -648,16 +648,17 @@ pub fn sanitize_name_with_rules(name: &str, is_windows: bool) -> Result<String, 
         if name.contains('\\') {
             return Err("File name contains backslash".into());
         }
-        if name.contains(':') {
-            return Err("File name contains invalid character ':' for Windows NTFS".into());
+        if name.ends_with('.') || name.ends_with(' ') {
+            return Err("File name cannot end in a dot or space on Windows".into());
+        }
+        if name
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        {
+            return Err("File name contains invalid character for Windows (< > : \" | ? *)".into());
         }
 
-        let clean = trimmed.trim_end_matches(['.', ' ']);
-        if clean.is_empty() {
-            return Err("File name cannot consist solely of dots and spaces".into());
-        }
-
-        let upper = clean.to_ascii_uppercase();
+        let upper = trimmed.to_ascii_uppercase();
         let base_stem = upper.split('.').next().unwrap_or("");
         const RESERVED: &[&str] = &[
             "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
@@ -667,7 +668,7 @@ pub fn sanitize_name_with_rules(name: &str, is_windows: bool) -> Result<String, 
             return Err(format!("Reserved Windows device name: {base_stem}"));
         }
 
-        Ok(clean.to_string())
+        Ok(trimmed.to_string())
     } else {
         Ok(trimmed.to_string())
     }
@@ -713,10 +714,144 @@ pub fn is_path_confined(base_dir: &Path, target: &Path) -> bool {
     norm_target.starts_with(&norm_base)
 }
 
-/// Validate that target path is not an existing symlink.
+#[cfg(windows)]
+pub fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.is_symlink() || (meta.file_attributes() & 0x400 != 0)
+}
+
+#[cfg(not(windows))]
+pub fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    meta.is_symlink()
+}
+
+/// Before creating any directory or file under dest_canon, walk each existing path component
+/// from dest_canon down with symlink_metadata; if any existing component is a symlink
+/// (on Windows also a reparse point/junction via file_attributes & 0x400) refuse that entry.
+pub fn check_components_for_symlinks(base_canon: &Path, target: &Path) -> Result<(), String> {
+    let rel = match target.strip_prefix(base_canon) {
+        Ok(r) => r,
+        Err(_) => {
+            return Err(format!(
+                "Target path '{}' is outside base destination '{}'",
+                target.display(),
+                base_canon.display()
+            ));
+        }
+    };
+
+    let mut current = base_canon.to_path_buf();
+    for comp in rel.components() {
+        match comp {
+            std::path::Component::Normal(c) => {
+                current.push(c);
+                if let Ok(meta) = std::fs::symlink_metadata(&current) {
+                    if is_symlink_or_reparse(&meta) {
+                        return Err(format!(
+                            "Path component '{}' is a symlink or reparse point; download refused for security",
+                            current.display()
+                        ));
+                    }
+                }
+            }
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "Invalid path component in relative path '{}'",
+                    rel.display()
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Formats a collision filename: "name (1).ext", "name (2).ext", etc.
+pub fn format_collision_name(file_name: &str, counter: u32) -> String {
+    let p = Path::new(file_name);
+    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(file_name);
+        format!("{} ({}).{}", stem, counter, ext)
+    } else {
+        format!("{} ({})", file_name, counter)
+    }
+}
+
+/// Gets a collision candidate filename, erroring if attempt exceeds 9999.
+pub fn get_collision_candidate(file_name: &str, counter: u32) -> Result<String, String> {
+    if counter > 9999 {
+        return Err(format!(
+            "Too many file collisions for '{}': exceeded maximum limit of 9999",
+            file_name
+        ));
+    }
+    Ok(format_collision_name(file_name, counter))
+}
+
+/// Opens a downloaded file non-overwriting with an explicit cap on collision attempts.
+pub async fn open_download_file_with_cap(
+    parent_dir: &Path,
+    sanitized_name: &str,
+    max_cap: u32,
+) -> Result<(tokio::fs::File, PathBuf, String), String> {
+    let initial_path = parent_dir.join(sanitized_name);
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&initial_path)
+        .await
+    {
+        Ok(f) => return Ok((f, initial_path, sanitized_name.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(format!(
+                "Failed to open download file '{}': {}",
+                initial_path.display(),
+                e
+            ))
+        }
+    }
+
+    for i in 1..=max_cap {
+        let candidate_name = format_collision_name(sanitized_name, i);
+        let candidate_path = parent_dir.join(&candidate_name);
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate_path)
+            .await
+        {
+            Ok(f) => return Ok((f, candidate_path, candidate_name)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to open download file '{}': {}",
+                    candidate_path.display(),
+                    e
+                ))
+            }
+        }
+    }
+
+    Err(format!(
+        "Too many file collisions for '{}': exceeded maximum limit of {}",
+        sanitized_name, max_cap
+    ))
+}
+
+/// Opens a downloaded file non-overwriting up to 9999 collisions then errors.
+pub async fn open_download_file_non_overwriting(
+    parent_dir: &Path,
+    sanitized_name: &str,
+) -> Result<(tokio::fs::File, PathBuf, String), String> {
+    open_download_file_with_cap(parent_dir, sanitized_name, 9999).await
+}
+
+/// Validate that target path is not an existing symlink or reparse point.
 pub async fn validate_download_target(target: &Path) -> Result<(), String> {
     if let Ok(meta) = tokio::fs::symlink_metadata(target).await {
-        if meta.is_symlink() {
+        if is_symlink_or_reparse(&meta) {
             return Err(format!(
                 "Target path '{}' is a symlink; download refused for security",
                 target.display()
@@ -1034,6 +1169,9 @@ async fn download_recursive(
         ));
     }
 
+    // Component symlink check before creating directory or file
+    check_components_for_symlinks(base_destination, local_path)?;
+
     let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
 
     match sftp.read_dir(&remote_path_str).await {
@@ -1089,18 +1227,24 @@ async fn download_recursive(
         Err(_) => {
             // Ensure destination directory exists
             if let Some(parent) = local_path.parent() {
+                check_components_for_symlinks(base_destination, parent)?;
                 tokio::fs::create_dir_all(parent)
                     .await
                     .map_err(|e| e.to_string())?;
             }
 
+            let file_name = local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| "Invalid local filename".to_string())?;
+            let parent_dir = local_path.parent().unwrap_or(base_destination);
+
             let mut remote_file = sftp
                 .open(&remote_path_str)
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut local_file = tokio::fs::File::create(local_path)
-                .await
-                .map_err(|e| e.to_string())?;
+            let (mut local_file, _actual_path, actual_name) =
+                open_download_file_non_overwriting(parent_dir, file_name).await?;
 
             let total_size = match sftp.metadata(&remote_path_str).await {
                 Ok(meta) => meta.size.unwrap_or(0),
@@ -1108,11 +1252,6 @@ async fn download_recursive(
             };
 
             let mut transferred_size = 0u64;
-            let file_name = local_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
 
             let _ = app.emit(
                 "transfer-progress",
@@ -1120,7 +1259,7 @@ async fn download_recursive(
                     transfer_id: transfer_id.to_string(),
                     transferred: transferred_size,
                     total: total_size,
-                    file_name: file_name.clone(),
+                    file_name: actual_name.clone(),
                 },
             );
 
@@ -1151,7 +1290,7 @@ async fn download_recursive(
                             transfer_id: transfer_id.to_string(),
                             transferred: transferred_size,
                             total: total_size,
-                            file_name: file_name.clone(),
+                            file_name: actual_name.clone(),
                         },
                     );
                 }
@@ -1164,7 +1303,7 @@ async fn download_recursive(
                         transfer_id: transfer_id.to_string(),
                         transferred: 0,
                         total: 0,
-                        file_name: file_name.clone(),
+                        file_name: actual_name.clone(),
                     },
                 );
             }
@@ -1236,6 +1375,7 @@ pub async fn sftp_download(
 ) -> Result<(), String> {
     let (dest_canon, _sanitized_name, target) =
         resolve_download_target(&remote_path, &destination_dir)?;
+    check_components_for_symlinks(&dest_canon, &target)?;
     validate_download_target(&target).await?;
 
     let handle = {
@@ -1705,19 +1845,124 @@ mod tests {
         assert!(sanitize_name_with_rules("aux", true).is_err());
         assert!(sanitize_name_with_rules("com1.txt", true).is_err());
         assert!(sanitize_name_with_rules("lpt3", true).is_err());
-        // Trailing dots and spaces stripped on Windows
-        assert_eq!(
-            sanitize_name_with_rules("test.txt...", true).unwrap(),
-            "test.txt"
-        );
-        assert_eq!(
-            sanitize_name_with_rules("test.txt   ", true).unwrap(),
-            "test.txt"
-        );
-        assert_eq!(
-            sanitize_name_with_rules("test.txt. . ", true).unwrap(),
-            "test.txt"
-        );
+        // Trailing dots and spaces rejected (not stripped) on Windows
+        assert!(sanitize_name_with_rules("test.txt...", true).is_err());
+        assert!(sanitize_name_with_rules("test.txt   ", true).is_err());
+        assert!(sanitize_name_with_rules("test.txt. . ", true).is_err());
+    }
+
+    #[test]
+    fn test_windows_rejection_all_chars_and_trailing_dot_space() {
+        // Rejects any of < > : " | ? * / \ plus control characters
+        for ch in ['<', '>', ':', '"', '|', '?', '*', '/', '\\'] {
+            let name = format!("bad{}file.txt", ch);
+            assert!(
+                sanitize_name_with_rules(&name, true).is_err(),
+                "Character {:?} must be rejected on Windows",
+                ch
+            );
+        }
+        for ctrl in ['\0', '\x01', '\x08', '\x0A', '\x1F'] {
+            let name = format!("bad{}file.txt", ctrl);
+            assert!(
+                sanitize_name_with_rules(&name, true).is_err(),
+                "Control character {:?} must be rejected on Windows",
+                ctrl
+            );
+        }
+        // Rejects names ending in '.' or ' '
+        for name in [
+            "test.",
+            "test ",
+            "file.txt.",
+            "file.txt ",
+            "a...",
+            "a   ",
+            "b. . ",
+            "data.csv.",
+            "data.csv ",
+        ] {
+            assert!(
+                sanitize_name_with_rules(name, true).is_err(),
+                "Trailing dot or space in {:?} must be rejected on Windows",
+                name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_file_collision_produces_name_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let file_path = base.join("report.txt");
+        tokio::fs::write(&file_path, b"original content")
+            .await
+            .unwrap();
+
+        let (mut file, actual_path, actual_name) =
+            open_download_file_non_overwriting(base, "report.txt")
+                .await
+                .unwrap();
+        file.write_all(b"new content").await.unwrap();
+        file.flush().await.unwrap();
+
+        assert_eq!(actual_name, "report (1).txt");
+        assert_eq!(actual_path, base.join("report (1).txt"));
+        // Original file must be untouched
+        let orig = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(orig, b"original content");
+        let new_content = tokio::fs::read(&actual_path).await.unwrap();
+        assert_eq!(new_content, b"new content");
+    }
+
+    #[tokio::test]
+    async fn test_download_collision_9999_cap_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        tokio::fs::write(base.join("cap.txt"), b"0").await.unwrap();
+        tokio::fs::write(base.join("cap (1).txt"), b"1")
+            .await
+            .unwrap();
+        tokio::fs::write(base.join("cap (2).txt"), b"2")
+            .await
+            .unwrap();
+
+        let res = open_download_file_with_cap(base, "cap.txt", 2).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("exceeded maximum limit of 2"));
+
+        // Test 9999 cap boundary
+        assert!(get_collision_candidate("cap.txt", 9999).is_ok());
+        let cap_err = get_collision_candidate("cap.txt", 10000);
+        assert!(cap_err.is_err());
+        assert!(cap_err.unwrap_err().contains("9999"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_component_symlink_refused_outside_dest() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        let outside = dir.path().join("outside");
+        tokio::fs::create_dir_all(&dest.join("photos"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+
+        // dest/photos is a real directory containing a symlink "sub" that points outside
+        std::os::unix::fs::symlink(&outside, dest.join("photos").join("sub")).unwrap();
+
+        let dest_canon = dunce::canonicalize(&dest).unwrap();
+        let target = dest_canon.join("photos").join("sub").join("evil.txt");
+
+        // Component symlink check must refuse
+        let check = check_components_for_symlinks(&dest_canon, &target);
+        assert!(check.is_err(), "Symlink component 'sub' must be refused");
+        assert!(check.unwrap_err().contains("symlink or reparse point"));
+
+        // Verify evil.txt must NOT be written outside dest
+        assert!(!outside.join("evil.txt").exists());
     }
 
     #[test]
