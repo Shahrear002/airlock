@@ -1,6 +1,6 @@
 use crate::ssh_session::AppState;
 use russh_sftp::client::SftpSession;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -23,6 +23,92 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub size: u64,
     pub mtime: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedItem {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferSummary {
+    pub transfer_id: String,
+    pub total_bytes: u64,
+    pub files_transferred: u64,
+    pub destination_path: String,
+    pub skipped: Vec<SkippedItem>,
+    pub renamed: Vec<(String, String)>,
+}
+
+#[derive(Debug, Default)]
+pub struct TransferStats {
+    pub total_bytes: u64,
+    pub files_transferred: u64,
+    pub skipped: Vec<SkippedItem>,
+    pub renamed: Vec<(String, String)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum UploadTargetKind {
+    File(u64),
+    FollowedFileSymlink(u64),
+    Directory,
+    SkippedSymlink(String),
+}
+
+/// Resolves whether a local upload target is a file, followed file symlink, directory, or skipped symlink.
+pub async fn resolve_upload_target(
+    local_path: &Path,
+    is_top_level: bool,
+) -> Result<UploadTargetKind, String> {
+    let sym_meta = tokio::fs::symlink_metadata(local_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if is_symlink_or_reparse(&sym_meta) {
+        if is_top_level {
+            match tokio::fs::metadata(local_path).await {
+                Ok(target_meta) => {
+                    if target_meta.is_file() {
+                        return Ok(UploadTargetKind::FollowedFileSymlink(target_meta.len()));
+                    } else {
+                        return Ok(UploadTargetKind::SkippedSymlink(
+                            "symbolic link".to_string(),
+                        ));
+                    }
+                }
+                Err(_) => {
+                    return Ok(UploadTargetKind::SkippedSymlink(
+                        "symbolic link".to_string(),
+                    ));
+                }
+            }
+        } else {
+            return Ok(UploadTargetKind::SkippedSymlink(
+                "symbolic link".to_string(),
+            ));
+        }
+    }
+
+    if sym_meta.is_dir() {
+        Ok(UploadTargetKind::Directory)
+    } else {
+        Ok(UploadTargetKind::File(sym_meta.len()))
+    }
+}
+
+/// Checks if the transfer directory depth exceeds the 64-level limit.
+pub fn check_transfer_depth(depth: usize, path: &str, stats: &mut TransferStats) -> bool {
+    if depth > 64 {
+        stats.skipped.push(SkippedItem {
+            path: path.to_string(),
+            reason: "directory depth exceeds 64 levels".to_string(),
+        });
+        false
+    } else {
+        true
+    }
 }
 
 /// Strict allowlist of safe text and source-code file extensions that can be opened
@@ -779,6 +865,7 @@ pub fn format_collision_name(file_name: &str, counter: u32) -> String {
 }
 
 /// Gets a collision candidate filename, erroring if attempt exceeds 9999.
+#[allow(dead_code)]
 pub fn get_collision_candidate(file_name: &str, counter: u32) -> Result<String, String> {
     if counter > 9999 {
         return Err(format!(
@@ -1039,116 +1126,127 @@ async fn upload_recursive(
     cancel_token: Arc<AtomicBool>,
     app: &AppHandle,
     transfer_id: &str,
+    depth: usize,
+    is_top_level: bool,
+    stats: &mut TransferStats,
 ) -> Result<(), String> {
-    // SEC-05: Use symlink_metadata to prevent following directory symlinks recursively
-    let metadata = tokio::fs::symlink_metadata(local_path)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if metadata.is_symlink() {
-        log::warn!(
-            "Skipping local symlink during upload: {}",
-            local_path.display()
-        );
+    if !check_transfer_depth(depth, &local_path.to_string_lossy(), stats) {
         return Ok(());
     }
 
-    if metadata.is_dir() {
-        let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
-        let _ = sftp.create_dir(&remote_path_str).await;
-
-        let mut entries = tokio::fs::read_dir(local_path)
-            .await
-            .map_err(|e| e.to_string())?;
-        while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
-            if cancel_token.load(Ordering::Relaxed) {
-                return Err("Transfer cancelled by user".into());
-            }
-            let entry_path = entry.path();
-            let entry_name = entry.file_name();
-            let remote_entry_path = remote_path.join(&entry_name);
-            Box::pin(upload_recursive(
-                sftp,
-                &entry_path,
-                &remote_entry_path,
-                cancel_token.clone(),
-                app,
-                transfer_id,
-            ))
-            .await?;
+    let target_kind = resolve_upload_target(local_path, is_top_level).await?;
+    match target_kind {
+        UploadTargetKind::SkippedSymlink(reason) => {
+            log::warn!("Skipping local symlink: {}", local_path.display());
+            stats.skipped.push(SkippedItem {
+                path: local_path.to_string_lossy().to_string(),
+                reason,
+            });
+            Ok(())
         }
-    } else {
-        let mut local_file = tokio::fs::File::open(local_path)
-            .await
-            .map_err(|e| e.to_string())?;
-        let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
-        let mut remote_file = sftp
-            .create(&remote_path_str)
-            .await
-            .map_err(|e| e.to_string())?;
+        UploadTargetKind::Directory => {
+            let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
+            let _ = sftp.create_dir(&remote_path_str).await;
 
-        let total_size = metadata.len();
-        let mut transferred_size = 0u64;
-        let file_name = local_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-
-        let _ = app.emit(
-            "transfer-progress",
-            TransferProgress {
-                transfer_id: transfer_id.to_string(),
-                transferred: transferred_size,
-                total: total_size,
-                file_name: file_name.clone(),
-            },
-        );
-
-        let mut buf = vec![0; 65536];
-        let mut chunks = 0;
-        loop {
-            if cancel_token.load(Ordering::Relaxed) {
-                return Err("Transfer cancelled by user".into());
+            let mut entries = tokio::fs::read_dir(local_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+                if cancel_token.load(Ordering::Relaxed) {
+                    return Err("Transfer cancelled by user".into());
+                }
+                let entry_path = entry.path();
+                let entry_name = entry.file_name();
+                let remote_entry_path = remote_path.join(&entry_name);
+                Box::pin(upload_recursive(
+                    sftp,
+                    &entry_path,
+                    &remote_entry_path,
+                    cancel_token.clone(),
+                    app,
+                    transfer_id,
+                    depth + 1,
+                    false,
+                    stats,
+                ))
+                .await?;
             }
-            let n = local_file.read(&mut buf).await.map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            remote_file
-                .write_all(&buf[..n])
+            Ok(())
+        }
+        UploadTargetKind::File(total_size) | UploadTargetKind::FollowedFileSymlink(total_size) => {
+            let mut local_file = tokio::fs::File::open(local_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
+            let mut remote_file = sftp
+                .create(&remote_path_str)
                 .await
                 .map_err(|e| e.to_string())?;
 
-            transferred_size += n as u64;
-            chunks += 1;
-            if chunks % 8 == 0 || transferred_size == total_size {
-                let _ = app.emit(
-                    "transfer-progress",
-                    TransferProgress {
-                        transfer_id: transfer_id.to_string(),
-                        transferred: transferred_size,
-                        total: total_size,
-                        file_name: file_name.clone(),
-                    },
-                );
-            }
-        }
+            let mut transferred_size = 0u64;
+            let file_name = local_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
 
-        if total_size == 0 {
             let _ = app.emit(
                 "transfer-progress",
                 TransferProgress {
                     transfer_id: transfer_id.to_string(),
-                    transferred: 0,
-                    total: 0,
+                    transferred: transferred_size,
+                    total: total_size,
                     file_name: file_name.clone(),
                 },
             );
+
+            let mut buf = vec![0; 65536];
+            let mut chunks = 0;
+            loop {
+                if cancel_token.load(Ordering::Relaxed) {
+                    return Err("Transfer cancelled by user".into());
+                }
+                let n = local_file.read(&mut buf).await.map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                remote_file
+                    .write_all(&buf[..n])
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                transferred_size += n as u64;
+                chunks += 1;
+                if chunks % 8 == 0 || transferred_size == total_size {
+                    let _ = app.emit(
+                        "transfer-progress",
+                        TransferProgress {
+                            transfer_id: transfer_id.to_string(),
+                            transferred: transferred_size,
+                            total: total_size,
+                            file_name: file_name.clone(),
+                        },
+                    );
+                }
+            }
+
+            if total_size == 0 {
+                let _ = app.emit(
+                    "transfer-progress",
+                    TransferProgress {
+                        transfer_id: transfer_id.to_string(),
+                        transferred: 0,
+                        total: 0,
+                        file_name: file_name.clone(),
+                    },
+                );
+            }
+
+            stats.files_transferred += 1;
+            stats.total_bytes += total_size;
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 async fn download_recursive(
@@ -1159,7 +1257,16 @@ async fn download_recursive(
     cancel_token: Arc<AtomicBool>,
     app: &AppHandle,
     transfer_id: &str,
+    depth: usize,
+    is_top_level: bool,
+    stats: &mut TransferStats,
 ) -> Result<(), String> {
+    let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
+
+    if !check_transfer_depth(depth, &remote_path_str, stats) {
+        return Ok(());
+    }
+
     // SEC-05: Ensure current target path remains inside base destination directory
     if !is_path_confined(base_destination, local_path) {
         return Err(format!(
@@ -1172,7 +1279,31 @@ async fn download_recursive(
     // Component symlink check before creating directory or file
     check_components_for_symlinks(base_destination, local_path)?;
 
-    let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
+    // Check top-level remote symlink
+    if is_top_level {
+        if let Ok(sym_meta) = sftp.symlink_metadata(&remote_path_str).await {
+            if sym_meta.is_symlink() {
+                match sftp.metadata(&remote_path_str).await {
+                    Ok(target_meta) => {
+                        if target_meta.is_dir() || target_meta.is_symlink() {
+                            stats.skipped.push(SkippedItem {
+                                path: remote_path_str,
+                                reason: "symbolic link".to_string(),
+                            });
+                            return Ok(());
+                        }
+                    }
+                    Err(_) => {
+                        stats.skipped.push(SkippedItem {
+                            path: remote_path_str,
+                            reason: "symbolic link".to_string(),
+                        });
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
 
     match sftp.read_dir(&remote_path_str).await {
         Ok(dir) => {
@@ -1188,11 +1319,17 @@ async fn download_recursive(
                     continue;
                 }
 
+                let remote_entry_path = remote_path.join(&raw_name);
+
                 // SEC-05: Sanitize entry name against traversal and reserved names
                 let sanitized_name = match sanitize_remote_name(&raw_name) {
                     Ok(n) => n,
                     Err(err) => {
                         log::warn!("Skipping unsafe remote entry '{}': {}", raw_name, err);
+                        stats.skipped.push(SkippedItem {
+                            path: remote_entry_path.to_string_lossy().replace("\\", "/"),
+                            reason: err,
+                        });
                         continue;
                     }
                 };
@@ -1201,14 +1338,21 @@ async fn download_recursive(
                 let attrs = entry.metadata();
                 if attrs.is_symlink() {
                     log::warn!("Skipping remote symlink: {}", raw_name);
+                    stats.skipped.push(SkippedItem {
+                        path: remote_entry_path.to_string_lossy().replace("\\", "/"),
+                        reason: "symbolic link".to_string(),
+                    });
                     continue;
                 }
 
-                let remote_entry_path = remote_path.join(&raw_name);
                 let local_entry_path = local_path.join(&sanitized_name);
 
                 if !is_path_confined(base_destination, &local_entry_path) {
                     log::warn!("Skipping path traversal entry: {}", raw_name);
+                    stats.skipped.push(SkippedItem {
+                        path: remote_entry_path.to_string_lossy().replace("\\", "/"),
+                        reason: "path traversal outside destination".to_string(),
+                    });
                     continue;
                 }
 
@@ -1220,6 +1364,9 @@ async fn download_recursive(
                     cancel_token.clone(),
                     app,
                     transfer_id,
+                    depth + 1,
+                    false,
+                    stats,
                 ))
                 .await?;
             }
@@ -1245,6 +1392,12 @@ async fn download_recursive(
                 .map_err(|e| e.to_string())?;
             let (mut local_file, _actual_path, actual_name) =
                 open_download_file_non_overwriting(parent_dir, file_name).await?;
+
+            if actual_name != file_name {
+                stats
+                    .renamed
+                    .push((file_name.to_string(), actual_name.clone()));
+            }
 
             let total_size = match sftp.metadata(&remote_path_str).await {
                 Ok(meta) => meta.size.unwrap_or(0),
@@ -1307,6 +1460,9 @@ async fn download_recursive(
                     },
                 );
             }
+
+            stats.files_transferred += 1;
+            stats.total_bytes += total_size;
         }
     }
 
@@ -1321,7 +1477,7 @@ pub async fn sftp_upload(
     transfer_id: String,
     local_path: String,
     remote_path: String,
-) -> Result<(), String> {
+) -> Result<TransferSummary, String> {
     let handle = {
         let connections = state.connections.lock().await;
         let conn = connections.get(&id).ok_or("Session not found")?;
@@ -1347,6 +1503,7 @@ pub async fn sftp_upload(
         .await
         .map_err(|e| e.to_string())?;
 
+    let mut stats = TransferStats::default();
     let res = upload_recursive(
         &sftp,
         Path::new(&local_path),
@@ -1354,6 +1511,9 @@ pub async fn sftp_upload(
         cancel_token,
         &app,
         &transfer_id,
+        0,
+        true,
+        &mut stats,
     )
     .await;
 
@@ -1361,7 +1521,14 @@ pub async fn sftp_upload(
         let mut transfers = state.active_transfers.lock().await;
         transfers.remove(&transfer_id);
     }
-    res
+    res.map(|_| TransferSummary {
+        transfer_id,
+        total_bytes: stats.total_bytes,
+        files_transferred: stats.files_transferred,
+        destination_path: remote_path,
+        skipped: stats.skipped,
+        renamed: stats.renamed,
+    })
 }
 
 #[tauri::command]
@@ -1372,7 +1539,7 @@ pub async fn sftp_download(
     transfer_id: String,
     remote_path: String,
     destination_dir: String,
-) -> Result<(), String> {
+) -> Result<TransferSummary, String> {
     let (dest_canon, _sanitized_name, target) =
         resolve_download_target(&remote_path, &destination_dir)?;
     check_components_for_symlinks(&dest_canon, &target)?;
@@ -1403,6 +1570,7 @@ pub async fn sftp_download(
         .await
         .map_err(|e| e.to_string())?;
 
+    let mut stats = TransferStats::default();
     let res = download_recursive(
         &sftp,
         Path::new(&remote_path),
@@ -1411,6 +1579,9 @@ pub async fn sftp_download(
         cancel_token,
         &app,
         &transfer_id,
+        0,
+        true,
+        &mut stats,
     )
     .await;
 
@@ -1418,7 +1589,14 @@ pub async fn sftp_download(
         let mut transfers = state.active_transfers.lock().await;
         transfers.remove(&transfer_id);
     }
-    res
+    res.map(|_| TransferSummary {
+        transfer_id,
+        total_bytes: stats.total_bytes,
+        files_transferred: stats.files_transferred,
+        destination_path: dest_canon.to_string_lossy().to_string(),
+        skipped: stats.skipped,
+        renamed: stats.renamed,
+    })
 }
 
 #[tauri::command]
@@ -1963,6 +2141,172 @@ mod tests {
 
         // Verify evil.txt must NOT be written outside dest
         assert!(!outside.join("evil.txt").exists());
+    }
+
+    #[test]
+    fn test_summary_lists_skipped_symlink_and_unsafe_name() {
+        let mut stats = TransferStats::default();
+
+        // 1. Record a skipped symlink
+        stats.skipped.push(SkippedItem {
+            path: "/remote/path/link_to_dir".to_string(),
+            reason: "symbolic link".to_string(),
+        });
+
+        // 2. Record an unsafe remote name
+        let unsafe_name = "invalid:filename<test>.txt";
+        let sanitizer_result = sanitize_name_with_rules(unsafe_name, true);
+        assert!(sanitizer_result.is_err());
+        let reason = sanitizer_result.unwrap_err();
+        stats.skipped.push(SkippedItem {
+            path: format!("/remote/path/{}", unsafe_name),
+            reason: reason.clone(),
+        });
+
+        let summary = TransferSummary {
+            transfer_id: "test-transfer-123".to_string(),
+            total_bytes: 1024,
+            files_transferred: 3,
+            destination_path: "/local/dest".to_string(),
+            skipped: stats.skipped,
+            renamed: stats.renamed,
+        };
+
+        assert_eq!(summary.files_transferred, 3);
+        assert_eq!(summary.skipped.len(), 2);
+        assert_eq!(summary.skipped[0].path, "/remote/path/link_to_dir");
+        assert_eq!(summary.skipped[0].reason, "symbolic link");
+        assert_eq!(
+            summary.skipped[1].path,
+            format!("/remote/path/{}", unsafe_name)
+        );
+        assert_eq!(summary.skipped[1].reason, reason);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_top_level_file_symlink_uploads_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_file = dir.path().join("real_target.txt");
+        tokio::fs::write(&target_file, b"sample content for symlink test")
+            .await
+            .unwrap();
+
+        let link_file = dir.path().join("link_file.txt");
+        std::os::unix::fs::symlink(&target_file, &link_file).unwrap();
+
+        // Top-level file symlink picked directly must follow metadata and return target length
+        let res = resolve_upload_target(&link_file, true).await.unwrap();
+        assert_eq!(res, UploadTargetKind::FollowedFileSymlink(31));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_nested_symlink_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_file = dir.path().join("target.txt");
+        tokio::fs::write(&target_file, b"content").await.unwrap();
+
+        let link_file = dir.path().join("nested_link.txt");
+        std::os::unix::fs::symlink(&target_file, &link_file).unwrap();
+
+        // Nested file symlink (is_top_level = false) must be skipped
+        let res = resolve_upload_target(&link_file, false).await.unwrap();
+        assert_eq!(
+            res,
+            UploadTargetKind::SkippedSymlink("symbolic link".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_directory_symlink_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().join("real_directory");
+        tokio::fs::create_dir(&target_dir).await.unwrap();
+
+        let link_dir = dir.path().join("link_directory");
+        std::os::unix::fs::symlink(&target_dir, &link_dir).unwrap();
+
+        // Top-level directory symlink must be skipped with "symbolic link"
+        let top_res = resolve_upload_target(&link_dir, true).await.unwrap();
+        assert_eq!(
+            top_res,
+            UploadTargetKind::SkippedSymlink("symbolic link".to_string())
+        );
+
+        // Nested directory symlink must also be skipped with "symbolic link"
+        let nested_res = resolve_upload_target(&link_dir, false).await.unwrap();
+        assert_eq!(
+            nested_res,
+            UploadTargetKind::SkippedSymlink("symbolic link".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tree_65_levels_deep_skipped_at_limit() {
+        let mut stats = TransferStats::default();
+
+        // Levels 0 to 64 should succeed
+        for d in 0..=64 {
+            let path = format!("/dir/level_{}", d);
+            assert!(
+                check_transfer_depth(d, &path, &mut stats),
+                "Depth {} should not be skipped",
+                d
+            );
+        }
+        assert!(stats.skipped.is_empty());
+
+        // Level 65 exceeds the 64-level limit and must be skipped
+        let deep_path = "/dir/level_65";
+        let allowed = check_transfer_depth(65, deep_path, &mut stats);
+        assert!(!allowed, "Depth 65 must be blocked/skipped");
+        assert_eq!(stats.skipped.len(), 1);
+        assert_eq!(stats.skipped[0].path, deep_path);
+        assert_eq!(stats.skipped[0].reason, "directory depth exceeds 64 levels");
+    }
+
+    #[tokio::test]
+    async fn test_renamed_pairs_are_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let file_name = "document.pdf";
+        let initial_file = base.join(file_name);
+        tokio::fs::write(&initial_file, b"version 0").await.unwrap();
+
+        let mut stats = TransferStats::default();
+
+        // Download collision 1 -> document (1).pdf
+        let (_f1, _p1, actual_name1) = open_download_file_non_overwriting(base, file_name)
+            .await
+            .unwrap();
+        if actual_name1 != file_name {
+            stats
+                .renamed
+                .push((file_name.to_string(), actual_name1.clone()));
+        }
+        assert_eq!(actual_name1, "document (1).pdf");
+
+        // Download collision 2 -> document (2).pdf
+        let (_f2, _p2, actual_name2) = open_download_file_non_overwriting(base, file_name)
+            .await
+            .unwrap();
+        if actual_name2 != file_name {
+            stats
+                .renamed
+                .push((file_name.to_string(), actual_name2.clone()));
+        }
+        assert_eq!(actual_name2, "document (2).pdf");
+
+        assert_eq!(stats.renamed.len(), 2);
+        assert_eq!(
+            stats.renamed,
+            vec![
+                ("document.pdf".to_string(), "document (1).pdf".to_string()),
+                ("document.pdf".to_string(), "document (2).pdf".to_string())
+            ]
+        );
     }
 
     #[test]

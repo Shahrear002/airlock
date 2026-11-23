@@ -2,7 +2,7 @@
 import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { FileCode, Folder, RefreshCw, X, Server, HardDrive, Loader2, FileEdit, Check, AlertCircle, Eye } from 'lucide-vue-next'
+import { FileCode, Folder, RefreshCw, X, Server, HardDrive, Loader2, FileEdit, Check, AlertCircle, Eye, ChevronDown, ChevronUp } from 'lucide-vue-next'
 import { useTabsStore } from '~/stores/tabs'
 import {
     ContextMenu,
@@ -24,6 +24,20 @@ interface FileEntry {
     is_dir: boolean
     size: number
     mtime: number
+}
+
+interface SkippedItem {
+    path: string
+    reason: string
+}
+
+interface TransferSummary {
+    transfer_id: string
+    total_bytes: number
+    files_transferred: number
+    destination_path: string
+    skipped: SkippedItem[]
+    renamed: [string, string][]
 }
 
 // Remote State
@@ -68,6 +82,39 @@ const showEditToast = (message: string, type: 'info' | 'success' | 'error', file
             editToast.value.show = false
         }, autoDismiss)
     }
+}
+
+// Transfer summary toast state
+const summaryToast = ref<{
+    show: boolean
+    expanded: boolean
+    title: string
+    summary: TransferSummary | null
+}>({
+    show: false,
+    expanded: false,
+    title: '',
+    summary: null,
+})
+let summaryToastTimer: ReturnType<typeof setTimeout> | null = null
+
+const showSummaryToast = (summary: TransferSummary) => {
+    if (summaryToastTimer) clearTimeout(summaryToastTimer)
+    const n = summary.files_transferred
+    const m = summary.skipped.length
+    const k = summary.renamed.length
+    const title = `${n} transferred, ${m} skipped, ${k} renamed`
+
+    summaryToast.value = {
+        show: true,
+        expanded: false,
+        title,
+        summary,
+    }
+
+    summaryToastTimer = setTimeout(() => {
+        summaryToast.value.show = false
+    }, 8000)
 }
 
 // Fake Drag & Drop State
@@ -160,6 +207,7 @@ onUnmounted(() => {
     if (unlistenEditSaved) unlistenEditSaved();
     if (unlistenEditError) unlistenEditError();
     if (editToastTimer) clearTimeout(editToastTimer);
+    if (summaryToastTimer) clearTimeout(summaryToastTimer);
 })
 
 const navigateRemote = (name: string) => {
@@ -282,8 +330,9 @@ const doDropLocal = async (item: {name: string, type: string}) => {
         const backendId = props.connectionId || props.sessionId
         const rPath = joinPath(remotePath.value, item.name)
         
-        await invoke('sftp_download', { id: backendId, transferId: tId, remotePath: rPath, destinationDir: localPath.value })
+        const res = await invoke<TransferSummary>('sftp_download', { id: backendId, transferId: tId, remotePath: rPath, destinationDir: localPath.value })
         loadLocalDir(localPath.value)
+        showSummaryToast(res)
     } catch (e: any) {
         if (!e.toString().includes('cancelled')) {
             alert("Download failed: " + e.toString())
@@ -309,8 +358,9 @@ const doDropRemote = async (item: {name: string, type: string}) => {
         const lPath = joinPath(localPath.value, item.name)
         const rPath = joinPath(remotePath.value, item.name)
         
-        await invoke('sftp_upload', { id: backendId, transferId: tId, localPath: lPath, remotePath: rPath })
+        const res = await invoke<TransferSummary>('sftp_upload', { id: backendId, transferId: tId, localPath: lPath, remotePath: rPath })
         loadRemoteDir(remotePath.value)
+        showSummaryToast(res)
     } catch (e: any) {
         if (!e.toString().includes('cancelled')) {
             alert("Upload failed: " + e.toString())
@@ -574,6 +624,63 @@ const editLocally = async (fileName: string) => {
               <button @click="editToast.show = false" class="p-1.5 hover:bg-white/10 rounded-full text-gray-500 hover:text-gray-300 transition-colors shrink-0" title="Dismiss">
                   <X class="w-3.5 h-3.5" />
               </button>
+          </div>
+      </Transition>
+
+      <!-- Transfer Summary Toast -->
+      <Transition
+          enter-active-class="transition-all duration-300 ease-out"
+          leave-active-class="transition-all duration-200 ease-in"
+          enter-from-class="translate-y-4 opacity-0 scale-95"
+          enter-to-class="translate-y-0 opacity-100 scale-100"
+          leave-from-class="translate-y-0 opacity-100 scale-100"
+          leave-to-class="translate-y-4 opacity-0 scale-95"
+      >
+          <div v-if="summaryToast.show && !transferLoading" 
+               class="absolute bottom-6 right-6 z-50 bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.5)] p-4 rounded-2xl flex flex-col gap-3 text-sm min-w-[320px] max-w-[480px]">
+              <div class="flex items-center gap-3">
+                  <div class="h-9 w-9 rounded-full flex items-center justify-center shrink-0 border"
+                       :class="{
+                           'bg-emerald-500/10 border-emerald-500/20 text-emerald-400': (summaryToast.summary?.skipped.length ?? 0) === 0,
+                           'bg-amber-500/10 border-amber-500/20 text-amber-400': (summaryToast.summary?.skipped.length ?? 0) > 0,
+                       }">
+                      <Check v-if="(summaryToast.summary?.skipped.length ?? 0) === 0" class="w-4 h-4" />
+                      <AlertCircle v-else class="w-4 h-4" />
+                  </div>
+                  <div class="flex flex-col flex-1 min-w-0">
+                      <span class="text-gray-200 font-medium tracking-tight text-xs">Transfer Complete</span>
+                      <span class="text-gray-300 text-xs font-semibold">{{ summaryToast.title }}</span>
+                  </div>
+                  <button v-if="(summaryToast.summary?.skipped.length ?? 0) > 0 || (summaryToast.summary?.renamed.length ?? 0) > 0"
+                          @click="summaryToast.expanded = !summaryToast.expanded"
+                          class="p-1 hover:bg-white/10 rounded text-gray-400 hover:text-gray-200 text-xs flex items-center gap-1 transition-colors">
+                      <span>{{ summaryToast.expanded ? 'Less' : 'Details' }}</span>
+                      <ChevronUp v-if="summaryToast.expanded" class="w-3.5 h-3.5" />
+                      <ChevronDown v-else class="w-3.5 h-3.5" />
+                  </button>
+                  <button @click="summaryToast.show = false" class="p-1 hover:bg-white/10 rounded-full text-gray-500 hover:text-gray-300 transition-colors shrink-0" title="Dismiss">
+                      <X class="w-3.5 h-3.5" />
+                  </button>
+              </div>
+
+              <!-- Expandable skipped / renamed list -->
+              <div v-if="summaryToast.expanded" class="border-t border-white/5 pt-2 flex flex-col gap-2 max-h-48 overflow-y-auto text-xs">
+                  <div v-if="summaryToast.summary?.skipped.length" class="flex flex-col gap-1">
+                      <span class="text-amber-400 font-medium">Skipped Items:</span>
+                      <div v-for="(item, idx) in summaryToast.summary.skipped" :key="idx" class="bg-black/20 p-1.5 rounded flex flex-col text-gray-300">
+                          <span class="font-mono text-[11px] truncate">{{ item.path }}</span>
+                          <span class="text-[10px] text-amber-300/80">{{ item.reason }}</span>
+                      </div>
+                  </div>
+                  <div v-if="summaryToast.summary?.renamed.length" class="flex flex-col gap-1">
+                      <span class="text-blue-400 font-medium">Renamed (collision prevented overwrite):</span>
+                      <div v-for="([orig, ren], idx) in summaryToast.summary.renamed" :key="idx" class="bg-black/20 p-1.5 rounded flex items-center gap-1.5 font-mono text-[11px] text-gray-300">
+                          <span class="text-gray-400">{{ orig }}</span>
+                          <span class="text-gray-500">&rarr;</span>
+                          <span class="text-emerald-400">{{ ren }}</span>
+                      </div>
+                  </div>
+              </div>
           </div>
       </Transition>
   </div>
