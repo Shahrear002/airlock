@@ -1,6 +1,9 @@
 use crate::ssh_session::AppState;
+#[allow(unused_imports)]
+use fs4::FileExt;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1030,37 +1033,356 @@ pub fn resolve_download_target(
     resolve_download_target_with_rules(remote_path, Path::new(destination_dir), cfg!(windows))
 }
 
-/// Get or create the secure temporary directory for local file editing.
-pub fn get_airlock_temp_dir() -> Result<PathBuf, std::io::Error> {
-    let dir = std::env::temp_dir().join("airlock_edits");
-    if !dir.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            builder.mode(0o700);
-            builder.create(&dir)?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::create_dir_all(&dir)?;
-        }
-    }
-    Ok(dir)
+/// Computes the SHA-256 digest of arbitrary bytes.
+pub fn compute_sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
 }
 
-/// Clean up orphaned temporary edit files on startup or application exit.
-pub fn cleanup_temp_edits() {
-    let dir = std::env::temp_dir().join("airlock_edits");
-    if dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let _ = std::fs::remove_file(path);
+struct InstanceTempState {
+    dir: PathBuf,
+    #[allow(dead_code)]
+    lock_file: std::fs::File,
+}
+
+static INSTANCE_TEMP_STATE: std::sync::Mutex<Option<InstanceTempState>> =
+    std::sync::Mutex::new(None);
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct ActiveEditTracker {
+    pub local_path: PathBuf,
+    pub remote_path: String,
+    pub file_name: String,
+    pub last_uploaded_hash: Arc<std::sync::Mutex<[u8; 32]>>,
+}
+
+static ACTIVE_EDITS: std::sync::Mutex<Vec<ActiveEditTracker>> = std::sync::Mutex::new(Vec::new());
+
+/// Validates or creates an instance temporary directory under `base_temp` named
+/// `airlock_edits_<pid>_<random hex>`, acquiring an exclusive advisory lock on `.lock`.
+pub fn create_and_validate_instance_dir(
+    base_temp: &Path,
+    pid: u32,
+    random_hex: &str,
+) -> Result<(PathBuf, std::fs::File), std::io::Error> {
+    let dir_name = format!("airlock_edits_{}_{}", pid, random_hex);
+    let instance_dir = base_temp.join(&dir_name);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+        if let Ok(meta) = std::fs::symlink_metadata(&instance_dir) {
+            if meta.is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("Path '{}' is a symlink", instance_dir.display()),
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("Path '{}' is not a directory", instance_dir.display()),
+                ));
+            }
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Pre-existing directory '{}' has mode {:o}, expected 0700",
+                        instance_dir.display(),
+                        mode
+                    ),
+                ));
+            }
+            let uid = meta.uid();
+            let current_uid = unsafe { libc::getuid() };
+            if current_uid != 0 && uid != current_uid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Pre-existing directory '{}' not owned by current user",
+                        instance_dir.display()
+                    ),
+                ));
+            }
+        } else {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&instance_dir)?;
+            let _ = std::fs::set_permissions(&instance_dir, std::fs::Permissions::from_mode(0o700));
+        }
+
+        // Verify with symlink_metadata
+        let meta = std::fs::symlink_metadata(&instance_dir)?;
+        if meta.is_symlink() || !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Path '{}' is a symlink or not a directory",
+                    instance_dir.display()
+                ),
+            ));
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Directory '{}' has mode {:o}, expected 0700",
+                    instance_dir.display(),
+                    mode
+                ),
+            ));
+        }
+        let uid = meta.uid();
+        let current_uid = unsafe { libc::getuid() };
+        if current_uid != 0 && uid != current_uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Directory '{}' not owned by current user",
+                    instance_dir.display()
+                ),
+            ));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&instance_dir)?;
+    }
+
+    let lock_path = instance_dir.join(".lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    lock_file.try_lock().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "Failed to lock instance lockfile '{}': {}",
+                lock_path.display(),
+                e
+            ),
+        )
+    })?;
+
+    Ok((instance_dir, lock_file))
+}
+
+/// Get or create the secure per-process temporary directory for local file editing.
+pub fn get_airlock_temp_dir() -> Result<PathBuf, std::io::Error> {
+    let mut guard = INSTANCE_TEMP_STATE
+        .lock()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Lock poisoned"))?;
+    if let Some(state) = guard.as_ref() {
+        return Ok(state.dir.clone());
+    }
+
+    let pid = std::process::id();
+    let random_hex: String = (0..8)
+        .map(|_| format!("{:02x}", rand::random::<u8>()))
+        .collect();
+    let (dir, lock_file) =
+        create_and_validate_instance_dir(&std::env::temp_dir(), pid, &random_hex)?;
+    let result = dir.clone();
+    *guard = Some(InstanceTempState { dir, lock_file });
+    Ok(result)
+}
+
+/// Resolves a safe filename for editing, falling back to "file" plus a validated lowercase
+/// alphanumeric extension if the sanitizer rejects the name.
+pub fn resolve_edit_temp_file_name(raw_name: &str, is_windows: bool) -> String {
+    match sanitize_name_with_rules(raw_name, is_windows) {
+        Ok(sanitized) => sanitized,
+        Err(_) => {
+            if let Some((_stem, ext)) = raw_name.rsplit_once('.') {
+                let clean_ext = ext.trim();
+                if !clean_ext.is_empty() && clean_ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    format!("file.{}", clean_ext.to_ascii_lowercase())
+                } else {
+                    "file".to_string()
+                }
+            } else {
+                "file".to_string()
+            }
+        }
+    }
+}
+
+/// Constructs the per-file temporary path inside the instance directory:
+/// `<instance dir>/<random hex>/<sanitized name>`.
+pub fn create_edit_temp_file_path(
+    instance_dir: &Path,
+    raw_name: &str,
+    is_windows: bool,
+    random_hex: &str,
+) -> Result<PathBuf, String> {
+    let sanitized_name = resolve_edit_temp_file_name(raw_name, is_windows);
+    let subdir = instance_dir.join(random_hex);
+    let target = subdir.join(&sanitized_name);
+    if !is_path_confined(instance_dir, &target) {
+        return Err(format!(
+            "Path traversal detected: '{}' escapes instance directory '{}'",
+            target.display(),
+            instance_dir.display()
+        ));
+    }
+    Ok(target)
+}
+
+/// Sweeps stale `airlock_edits_*` directories, removing unlocked stale directories
+/// while skipping active instances holding an exclusive lock, and removing legacy `airlock_edits`.
+pub fn sweep_stale_temp_edits_in(temp_base: &Path, our_instance: Option<&Path>) {
+    // 1. Delete the legacy un-namespaced airlock_edits folder once
+    let legacy_dir = temp_base.join("airlock_edits");
+    if legacy_dir.exists() {
+        let _ = std::fs::remove_dir_all(&legacy_dir);
+    }
+
+    // 2. Scan for airlock_edits_* directories
+    let entries = match std::fs::read_dir(temp_base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if !file_name.starts_with("airlock_edits_") {
+            continue;
+        }
+
+        if let Some(ours) = our_instance {
+            if path == ours {
+                continue;
+            }
+        }
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let lock_path = path.join(".lock");
+        if lock_path.exists() {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+            {
+                match file.try_lock() {
+                    Ok(()) => {
+                        // Lock obtained! The owner process is gone.
+                        // Drop the file lock handle first before deleting (Windows cannot delete an open file)
+                        drop(file);
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
+                    Err(_) => {
+                        // Locked: another instance is running, skip it
+                    }
                 }
             }
+        } else {
+            // Unlocked or orphaned directory without .lock
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// Startup sweep of stale temporary directories.
+pub fn cleanup_temp_edits() {
+    let our_instance = match get_airlock_temp_dir() {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            log::warn!(
+                "Failed to initialize instance temp dir during startup sweep: {}",
+                e
+            );
+            None
+        }
+    };
+    sweep_stale_temp_edits_in(&std::env::temp_dir(), our_instance.as_deref());
+}
+
+/// Called on window close: deletes only our instance directory, keeping any files
+/// with un-uploaded local changes.
+pub fn cleanup_current_instance_on_close() {
+    let mut unsaved_paths = std::collections::HashSet::new();
+    if let Ok(edits) = ACTIVE_EDITS.lock() {
+        for edit in edits.iter() {
+            if edit.local_path.exists() {
+                if let Ok(bytes) = std::fs::read(&edit.local_path) {
+                    let cur_hash = compute_sha256(&bytes);
+                    let last_hash = edit
+                        .last_uploaded_hash
+                        .lock()
+                        .map(|h| *h)
+                        .unwrap_or([0; 32]);
+                    if cur_hash != last_hash {
+                        unsaved_paths.insert(edit.local_path.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut guard = match INSTANCE_TEMP_STATE.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    if let Some(state) = guard.take() {
+        let instance_dir = state.dir;
+        let lock_file = state.lock_file;
+
+        let mut has_kept_files = false;
+        if let Ok(subdirs) = std::fs::read_dir(&instance_dir) {
+            for subdir_entry in subdirs.flatten() {
+                let sub_path = subdir_entry.path();
+                if sub_path.file_name().and_then(|n| n.to_str()) == Some(".lock") {
+                    continue;
+                }
+                if sub_path.is_dir() {
+                    let mut sub_has_unsaved = false;
+                    if let Ok(files) = std::fs::read_dir(&sub_path) {
+                        for f_entry in files.flatten() {
+                            let fp = f_entry.path();
+                            if unsaved_paths.contains(&fp) {
+                                sub_has_unsaved = true;
+                                has_kept_files = true;
+                            } else {
+                                let _ = std::fs::remove_file(&fp);
+                            }
+                        }
+                    }
+                    if !sub_has_unsaved {
+                        let _ = std::fs::remove_dir_all(&sub_path);
+                    }
+                } else if !unsaved_paths.contains(&sub_path) {
+                    let _ = std::fs::remove_file(&sub_path);
+                } else {
+                    has_kept_files = true;
+                }
+            }
+        }
+
+        drop(lock_file);
+
+        if !has_kept_files {
+            let _ = std::fs::remove_file(instance_dir.join(".lock"));
+            let _ = std::fs::remove_dir(&instance_dir);
         }
     }
 }
@@ -1757,39 +2079,54 @@ pub async fn edit_remote_file(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let raw_ext = remote_p.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let extension = if raw_ext.is_empty() {
-        String::new()
-    } else {
-        format!(".{}", raw_ext)
-    };
-
-    let stem = remote_p
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let prefix = format!("airlock_{}_", stem);
-
     let airlock_temp_dir = get_airlock_temp_dir()
         .map_err(|e| format!("Failed to create temp edit directory: {}", e))?;
 
-    let temp_file = tempfile::Builder::new()
-        .prefix(&prefix)
-        .suffix(&extension)
-        .tempfile_in(&airlock_temp_dir)
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+    let random_hex_dir: String = (0..8)
+        .map(|_| format!("{:02x}", rand::random::<u8>()))
+        .collect();
+    let temp_path = create_edit_temp_file_path(
+        &airlock_temp_dir,
+        &file_name,
+        cfg!(windows),
+        &random_hex_dir,
+    )?;
 
-    // Write contents and persist
-    let (mut file, temp_path) = temp_file
-        .keep()
-        .map_err(|e| format!("Failed to persist temp file: {}", e))?;
+    if let Some(parent) = temp_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create edit temp directory: {}", e))?;
+    }
+
     use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|e| {
+            format!(
+                "Failed to create temp file '{}': {}",
+                temp_path.display(),
+                e
+            )
+        })?;
     file.write_all(&contents)
         .map_err(|e| format!("Failed to write temp file: {}", e))?;
     file.flush()
         .map_err(|e| format!("Failed to flush temp file: {}", e))?;
     drop(file);
+
+    let initial_hash = compute_sha256(&contents);
+    let last_uploaded_hash = Arc::new(std::sync::Mutex::new(initial_hash));
+
+    // Register active edit
+    if let Ok(mut edits) = ACTIVE_EDITS.lock() {
+        edits.push(ActiveEditTracker {
+            local_path: temp_path.clone(),
+            remote_path: remote_path.clone(),
+            file_name: file_name.clone(),
+            last_uploaded_hash: last_uploaded_hash.clone(),
+        });
+    }
 
     // 5. SEC-04: Safe Editor Execution
     let validated_editor = resolve_configured_editor(&*state.editor_store, validate_editor_path)?;
@@ -1892,6 +2229,7 @@ pub async fn edit_remote_file(
     let temp_path_clone = temp_path.clone();
     let app_clone = app.clone();
     let id_clone = id.clone();
+    let last_uploaded_hash_clone = last_uploaded_hash.clone();
 
     tokio::task::spawn_blocking(move || {
         use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -1988,6 +2326,12 @@ pub async fn edit_remote_file(
                         match result {
                             Ok(()) => {
                                 last_upload = Some(Instant::now());
+                                if let Ok(bytes) = std::fs::read(&tp) {
+                                    let h = compute_sha256(&bytes);
+                                    if let Ok(mut luh) = last_uploaded_hash_clone.lock() {
+                                        *luh = h;
+                                    }
+                                }
                                 let _ = app_ref.emit(
                                     "edit-file-saved",
                                     serde_json::json!({
@@ -2021,10 +2365,46 @@ pub async fn edit_remote_file(
             }
         }
 
-        // Drop watcher and clean up temp file
+        // Drop watcher and clean up temp file if not unsaved
         drop(watcher);
-        let _ = std::fs::remove_file(&temp_path_clone);
-        log::info!("Cleaned up temp edit file: {}", temp_path_clone.display());
+
+        let mut is_unsaved = false;
+        if temp_path_clone.exists() {
+            if let Ok(bytes) = std::fs::read(&temp_path_clone) {
+                let cur_hash = compute_sha256(&bytes);
+                let last_hash = last_uploaded_hash_clone
+                    .lock()
+                    .map(|h| *h)
+                    .unwrap_or([0; 32]);
+                if cur_hash != last_hash {
+                    is_unsaved = true;
+                }
+            }
+        }
+
+        if is_unsaved {
+            log::warn!(
+                "Watcher ended with unsaved changes. Preserving temp file: {}",
+                temp_path_clone.display()
+            );
+            let _ = app_clone.emit(
+                "edit-unsaved",
+                serde_json::json!({
+                    "local_path": temp_path_clone.to_string_lossy(),
+                    "remote_path": remote_path_clone,
+                    "file_name": file_name_clone,
+                }),
+            );
+        } else {
+            let _ = std::fs::remove_file(&temp_path_clone);
+            if let Some(parent) = temp_path_clone.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+            log::info!("Cleaned up temp edit file: {}", temp_path_clone.display());
+            if let Ok(mut edits) = ACTIVE_EDITS.lock() {
+                edits.retain(|e| e.local_path != temp_path_clone);
+            }
+        }
     });
 
     Ok(())
@@ -3171,5 +3551,209 @@ mod tests {
         assert_eq!(cmd.get_program(), ed_path.as_os_str());
         let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
         assert_eq!(args, vec![temp_file.as_os_str()]);
+    }
+
+    #[test]
+    fn test_instance_dir_naming() {
+        let temp_base = std::env::temp_dir();
+        let pid = 12345;
+        let hex = "deadbeef01234567";
+        let (dir, lock_file) = create_and_validate_instance_dir(&temp_base, pid, hex).unwrap();
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name, format!("airlock_edits_{}_{}", pid, hex));
+        assert!(dir.is_dir());
+        assert!(dir.join(".lock").is_file());
+        drop(lock_file);
+        let _ = std::fs::remove_file(dir.join(".lock"));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_sweep_skips_held_lock_and_deletes_stale_and_removes_legacy() {
+        let base = std::env::temp_dir().join(format!("test_sweep_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Legacy directory
+        let legacy = base.join("airlock_edits");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("old.txt"), "legacy data").unwrap();
+
+        // Stale instance directory (unlocked)
+        let stale_dir = base.join("airlock_edits_1111_stale00000000");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(stale_dir.join(".lock"), "").unwrap();
+        std::fs::write(stale_dir.join("stale_edit.txt"), "stale").unwrap();
+
+        // Active instance 1 (locked)
+        let active_dir1 = base.join("airlock_edits_2222_active1111111");
+        std::fs::create_dir_all(&active_dir1).unwrap();
+        let lock_file1 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(active_dir1.join(".lock"))
+            .unwrap();
+        lock_file1.try_lock().unwrap();
+
+        // Active instance 2 (locked)
+        let active_dir2 = base.join("airlock_edits_3333_active2222222");
+        std::fs::create_dir_all(&active_dir2).unwrap();
+        let lock_file2 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(active_dir2.join(".lock"))
+            .unwrap();
+        lock_file2.try_lock().unwrap();
+
+        // Perform startup sweep
+        sweep_stale_temp_edits_in(&base, None);
+
+        // Assertions:
+        // 1. Legacy directory removed
+        assert!(
+            !legacy.exists(),
+            "Legacy airlock_edits directory must be removed"
+        );
+        // 2. Stale directory removed
+        assert!(
+            !stale_dir.exists(),
+            "Stale unlocked directory must be removed"
+        );
+        // 3. Active locked directories preserved
+        assert!(
+            active_dir1.exists(),
+            "Active locked directory 1 must NOT be removed"
+        );
+        assert!(
+            active_dir2.exists(),
+            "Active locked directory 2 must NOT be removed"
+        );
+
+        // Unlock and cleanup
+        drop(lock_file1);
+        drop(lock_file2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_per_file_path_inside_instance_dir_using_sanitized_name() {
+        let instance_dir = Path::new(if cfg!(windows) {
+            r"C:\temp\airlock_edits_100_abc"
+        } else {
+            "/tmp/airlock_edits_100_abc"
+        });
+        let random_hex = "0123456789abcdef";
+
+        // Normal safe file
+        let path =
+            create_edit_temp_file_path(instance_dir, "document.txt", false, random_hex).unwrap();
+        assert_eq!(path, instance_dir.join(random_hex).join("document.txt"));
+
+        // Name with spaces and mixed case
+        let path =
+            create_edit_temp_file_path(instance_dir, "My Notes.md", false, random_hex).unwrap();
+        assert_eq!(path, instance_dir.join(random_hex).join("My Notes.md"));
+
+        // Windows unsafe name fallback
+        let path = create_edit_temp_file_path(instance_dir, "CON.txt", true, random_hex).unwrap();
+        assert_eq!(path, instance_dir.join(random_hex).join("file.txt"));
+    }
+
+    #[test]
+    fn test_path_traversal_cannot_escape_instance_dir() {
+        let instance_dir = Path::new(if cfg!(windows) {
+            r"C:\temp\airlock_edits_100_abc"
+        } else {
+            "/tmp/airlock_edits_100_abc"
+        });
+        let random_hex = "sub1";
+
+        let traversals = [
+            "../../etc/passwd",
+            "../../../evil.sh",
+            r"..\..\windows\system32\cmd.exe",
+            "foo/../../bar.txt",
+            "/etc/shadow",
+        ];
+
+        for bad in traversals {
+            let res = create_edit_temp_file_path(instance_dir, bad, false, random_hex);
+            match res {
+                Ok(p) => {
+                    assert!(
+                        is_path_confined(instance_dir, &p),
+                        "Path '{:?}' escaped instance directory '{:?}'",
+                        p,
+                        instance_dir
+                    );
+                    assert!(p.starts_with(instance_dir.join(random_hex)));
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_edit_temp_file_name_fallback_matrix() {
+        // Valid names
+        assert_eq!(resolve_edit_temp_file_name("hello.rs", false), "hello.rs");
+        assert_eq!(resolve_edit_temp_file_name("notes.txt", true), "notes.txt");
+
+        // Invalid Windows names fall back to "file.<ext>" or "file"
+        assert_eq!(
+            resolve_edit_temp_file_name("bad:stream.txt", true),
+            "file.txt"
+        );
+        assert_eq!(resolve_edit_temp_file_name("trailing.dot.", true), "file");
+        assert_eq!(resolve_edit_temp_file_name("COM1.log", true), "file.log");
+        assert_eq!(
+            resolve_edit_temp_file_name("has?question.py", true),
+            "file.py"
+        );
+        assert_eq!(
+            resolve_edit_temp_file_name("../escaped.sh", false),
+            "file.sh"
+        );
+        assert_eq!(resolve_edit_temp_file_name("../noext", false), "file");
+        assert_eq!(resolve_edit_temp_file_name("has?bad.ext#1", true), "file");
+        assert_eq!(
+            resolve_edit_temp_file_name("has?good.TXT", true),
+            "file.txt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unix_instance_dir_validation_refusals() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        let base = std::env::temp_dir().join(format!("test_unix_refuse_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // 1. Pre-existing directory with mode 0777 must be refused
+        let dir_777 = base.join("airlock_edits_9999_mode777");
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o777);
+        builder.create(&dir_777).unwrap();
+        std::fs::set_permissions(&dir_777, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let res = create_and_validate_instance_dir(&base, 9999, "mode777");
+        assert!(res.is_err(), "Pre-existing 0777 directory must be refused");
+        let err = res.err().unwrap();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // 2. Pre-existing symlink must be refused
+        let real_dir = base.join("target_dir");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let symlink_dir = base.join("airlock_edits_8888_symlink");
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
+
+        let res = create_and_validate_instance_dir(&base, 8888, "symlink");
+        assert!(res.is_err(), "Symlink directory must be refused");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -67,6 +67,7 @@ let unlistenProgress: (() => void) | null = null;
 let unlistenEditOpened: (() => void) | null = null;
 let unlistenEditSaved: (() => void) | null = null;
 let unlistenEditError: (() => void) | null = null;
+let unlistenEditUnsaved: (() => void) | null = null;
 
 // Edit toast state
 const editToast = ref<{ show: boolean, message: string, type: 'info' | 'success' | 'error', fileName: string }>(
@@ -201,6 +202,16 @@ onMounted(async () => {
         const { file_name, error } = event.payload
         showEditToast(`Failed to save ${file_name}: ${error}`, 'error', file_name, 6000)
     })
+
+    unlistenEditUnsaved = await listen('edit-unsaved', (event: any) => {
+        const { local_path, file_name } = event.payload
+        showEditToast(
+            `Your edits to ${file_name} could not be uploaded (session closed). They are saved at ${local_path}.`,
+            'error',
+            file_name,
+            0
+        )
+    })
 })
 
 onUnmounted(() => {
@@ -208,6 +219,7 @@ onUnmounted(() => {
     if (unlistenEditOpened) unlistenEditOpened();
     if (unlistenEditSaved) unlistenEditSaved();
     if (unlistenEditError) unlistenEditError();
+    if (unlistenEditUnsaved) unlistenEditUnsaved();
     if (editToastTimer) clearTimeout(editToastTimer);
     if (summaryToastTimer) clearTimeout(summaryToastTimer);
 })
@@ -621,7 +633,7 @@ const editLocally = async (fileName: string) => {
                         }">
                       {{ editToast.type === 'info' ? 'Watching' : editToast.type === 'success' ? 'Saved ✓' : 'Error' }}
                   </span>
-                  <span class="text-gray-400 text-xs truncate">{{ editToast.message }}</span>
+                  <span class="text-gray-400 text-xs break-all">{{ editToast.message }}</span>
               </div>
               <button @click="editToast.show = false" class="p-1.5 hover:bg-white/10 rounded-full text-gray-500 hover:text-gray-300 transition-colors shrink-0" title="Dismiss">
                   <X class="w-3.5 h-3.5" />

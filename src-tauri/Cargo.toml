@@ -39,6 +39,12 @@ tempfile = "3"
 open = "5"
 dunce = "1.0"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+fs4 = "1.1.0"
+rand = "0.8"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.4"

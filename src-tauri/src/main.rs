@@ -231,7 +231,7 @@ fn main() {
                         }
                         None => {}
                     }
-                    sftp::cleanup_temp_edits();
+                    sftp::cleanup_current_instance_on_close();
                 });
             }
         })
