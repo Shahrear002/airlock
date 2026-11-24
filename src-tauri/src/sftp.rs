@@ -761,6 +761,7 @@ pub fn sanitize_name_with_rules(name: &str, is_windows: bool) -> Result<String, 
 }
 
 /// Sanitize untrusted remote filenames to prevent path traversal, ADS streams, and device collision.
+#[allow(dead_code)]
 pub fn sanitize_remote_name(name: &str) -> Result<String, String> {
     sanitize_name_with_rules(name, cfg!(windows))
 }
@@ -800,10 +801,47 @@ pub fn is_path_confined(base_dir: &Path, target: &Path) -> bool {
     norm_target.starts_with(&norm_base)
 }
 
+/// Decision outcome for classifying a remote directory entry during download.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EntryDecision {
+    Download { sanitized: String },
+    Skip { reason: String },
+}
+
+/// Pure classifier for remote directory entries during recursive download.
+pub fn classify_remote_entry(
+    raw_name: &str,
+    is_symlink: bool,
+    is_windows: bool,
+    base: &Path,
+    local_parent: &Path,
+) -> EntryDecision {
+    if is_symlink {
+        return EntryDecision::Skip {
+            reason: "symbolic link".to_string(),
+        };
+    }
+
+    let sanitized = match sanitize_name_with_rules(raw_name, is_windows) {
+        Ok(name) => name,
+        Err(reason) => return EntryDecision::Skip { reason },
+    };
+
+    let local_entry_path = local_parent.join(&sanitized);
+    if !is_path_confined(base, &local_entry_path) {
+        return EntryDecision::Skip {
+            reason: "path traversal outside destination".to_string(),
+        };
+    }
+
+    EntryDecision::Download { sanitized }
+}
+
 #[cfg(windows)]
 pub fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    meta.is_symlink() || (meta.file_attributes() & 0x400 != 0)
+    // std::fs::Metadata::is_symlink() on Windows already treats symlinks and directory junctions
+    // as symlinks, while avoiding false positives on OneDrive / cloud-sync placeholder reparse points.
+    meta.is_symlink()
 }
 
 #[cfg(not(windows))]
@@ -1320,55 +1358,43 @@ async fn download_recursive(
                 }
 
                 let remote_entry_path = remote_path.join(&raw_name);
+                let attrs = entry.metadata();
 
-                // SEC-05: Sanitize entry name against traversal and reserved names
-                let sanitized_name = match sanitize_remote_name(&raw_name) {
-                    Ok(n) => n,
-                    Err(err) => {
-                        log::warn!("Skipping unsafe remote entry '{}': {}", raw_name, err);
+                match classify_remote_entry(
+                    &raw_name,
+                    attrs.is_symlink(),
+                    cfg!(windows),
+                    base_destination,
+                    local_path,
+                ) {
+                    EntryDecision::Skip { reason } => {
+                        log::warn!("Skipping remote entry '{}': {}", raw_name, reason);
                         stats.skipped.push(SkippedItem {
                             path: remote_entry_path.to_string_lossy().replace("\\", "/"),
-                            reason: err,
+                            reason,
                         });
                         continue;
                     }
-                };
-
-                // SEC-05: Skip remote symlinks to prevent traversal
-                let attrs = entry.metadata();
-                if attrs.is_symlink() {
-                    log::warn!("Skipping remote symlink: {}", raw_name);
-                    stats.skipped.push(SkippedItem {
-                        path: remote_entry_path.to_string_lossy().replace("\\", "/"),
-                        reason: "symbolic link".to_string(),
-                    });
-                    continue;
+                    EntryDecision::Download { sanitized } => {
+                        if sanitized != raw_name {
+                            stats.renamed.push((raw_name.clone(), sanitized.clone()));
+                        }
+                        let local_entry_path = local_path.join(&sanitized);
+                        Box::pin(download_recursive(
+                            sftp,
+                            &remote_entry_path,
+                            &local_entry_path,
+                            base_destination,
+                            cancel_token.clone(),
+                            app,
+                            transfer_id,
+                            depth + 1,
+                            false,
+                            stats,
+                        ))
+                        .await?;
+                    }
                 }
-
-                let local_entry_path = local_path.join(&sanitized_name);
-
-                if !is_path_confined(base_destination, &local_entry_path) {
-                    log::warn!("Skipping path traversal entry: {}", raw_name);
-                    stats.skipped.push(SkippedItem {
-                        path: remote_entry_path.to_string_lossy().replace("\\", "/"),
-                        reason: "path traversal outside destination".to_string(),
-                    });
-                    continue;
-                }
-
-                Box::pin(download_recursive(
-                    sftp,
-                    &remote_entry_path,
-                    &local_entry_path,
-                    base_destination,
-                    cancel_token.clone(),
-                    app,
-                    transfer_id,
-                    depth + 1,
-                    false,
-                    stats,
-                ))
-                .await?;
             }
         }
         Err(_) => {
@@ -1540,7 +1566,7 @@ pub async fn sftp_download(
     remote_path: String,
     destination_dir: String,
 ) -> Result<TransferSummary, String> {
-    let (dest_canon, _sanitized_name, target) =
+    let (dest_canon, sanitized_name, target) =
         resolve_download_target(&remote_path, &destination_dir)?;
     check_components_for_symlinks(&dest_canon, &target)?;
     validate_download_target(&target).await?;
@@ -1570,7 +1596,16 @@ pub async fn sftp_download(
         .await
         .map_err(|e| e.to_string())?;
 
+    let raw_name = remote_path
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
     let mut stats = TransferStats::default();
+    if !raw_name.is_empty() && raw_name != sanitized_name {
+        stats
+            .renamed
+            .push((raw_name.to_string(), sanitized_name.clone()));
+    }
     let res = download_recursive(
         &sftp,
         Path::new(&remote_path),
@@ -2307,6 +2342,102 @@ mod tests {
                 ("document.pdf".to_string(), "document (2).pdf".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn test_classify_remote_entry_decision_matrix() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let sub = base.join("subfolder");
+        let _ = std::fs::create_dir_all(&sub);
+
+        // 1. Normal name
+        assert_eq!(
+            classify_remote_entry("report.txt", false, true, base, &sub),
+            EntryDecision::Download {
+                sanitized: "report.txt".to_string()
+            }
+        );
+
+        // 2. Symlink
+        assert_eq!(
+            classify_remote_entry("symlink_entry", true, false, base, &sub),
+            EntryDecision::Skip {
+                reason: "symbolic link".to_string()
+            }
+        );
+
+        // 3. Unsafe name (forbidden characters on Windows)
+        let unsafe_decision = classify_remote_entry("bad:name<test>.txt", false, true, base, &sub);
+        assert!(matches!(unsafe_decision, EntryDecision::Skip { .. }));
+        if let EntryDecision::Skip { reason } = unsafe_decision {
+            assert!(reason.contains("invalid character"));
+        }
+
+        // 4. Reserved name on Windows (e.g. CON, NUL, AUX)
+        let reserved_decision = classify_remote_entry("con.txt", false, true, base, &sub);
+        assert!(matches!(reserved_decision, EntryDecision::Skip { .. }));
+        if let EntryDecision::Skip { reason } = reserved_decision {
+            assert!(reason.contains("Reserved Windows device name"));
+        }
+
+        // 5. Trailing dot on Windows rules
+        let trailing_dot_decision = classify_remote_entry("file.txt.", false, true, base, &sub);
+        assert!(matches!(trailing_dot_decision, EntryDecision::Skip { .. }));
+        if let EntryDecision::Skip { reason } = trailing_dot_decision {
+            assert!(reason.contains("cannot end in a dot or space"));
+        }
+
+        // 6. Traversal escaping base destination
+        let outside = dir.path().parent().unwrap();
+        let traversal_decision = classify_remote_entry("normal.txt", false, false, base, outside);
+        assert_eq!(
+            traversal_decision,
+            EntryDecision::Skip {
+                reason: "path traversal outside destination".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_whitespace_trimmed_name_recorded_as_renamed_or_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let mut stats = TransferStats::default();
+
+        // Leading whitespace: on Windows and Unix, trimmed to "spaced.txt"
+        let raw_name = "  spaced.txt";
+        let decision = classify_remote_entry(raw_name, false, true, base, base);
+        match decision {
+            EntryDecision::Download { sanitized } => {
+                if sanitized != raw_name {
+                    stats.renamed.push((raw_name.to_string(), sanitized));
+                }
+            }
+            EntryDecision::Skip { .. } => panic!("Expected download with sanitized name"),
+        }
+        assert_eq!(stats.renamed.len(), 1);
+        assert_eq!(
+            stats.renamed[0],
+            ("  spaced.txt".to_string(), "spaced.txt".to_string())
+        );
+
+        // Trailing space on Windows rules: rejected and recorded in stats.skipped
+        let raw_trailing = "spaced.txt ";
+        let trailing_decision = classify_remote_entry(raw_trailing, false, true, base, base);
+        match trailing_decision {
+            EntryDecision::Skip { reason } => {
+                stats.skipped.push(SkippedItem {
+                    path: format!("/remote/{}", raw_trailing),
+                    reason,
+                });
+            }
+            EntryDecision::Download { .. } => panic!("Expected skip on Windows trailing space"),
+        }
+        assert_eq!(stats.skipped.len(), 1);
+        assert!(stats.skipped[0]
+            .reason
+            .contains("cannot end in a dot or space"));
     }
 
     #[test]

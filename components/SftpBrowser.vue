@@ -112,9 +112,11 @@ const showSummaryToast = (summary: TransferSummary) => {
         summary,
     }
 
-    summaryToastTimer = setTimeout(() => {
-        summaryToast.value.show = false
-    }, 8000)
+    if (summary.skipped.length === 0) {
+        summaryToastTimer = setTimeout(() => {
+            summaryToast.value.show = false
+        }, 8000)
+    }
 }
 
 // Fake Drag & Drop State
