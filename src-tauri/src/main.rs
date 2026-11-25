@@ -9,7 +9,7 @@ mod vpn;
 
 use sftp::{
     cancel_transfer, edit_remote_file, get_local_home_dir, local_list_dir, sftp_download,
-    sftp_list_dir, sftp_upload,
+    sftp_list_dir, sftp_upload, take_recovered_edits,
 };
 use ssh_session::{
     connect_and_stream, get_known_hosts, remove_known_host, respond_host_key, AppState, SshInput,
@@ -187,6 +187,7 @@ fn main() {
             sftp_list_dir,
             local_list_dir,
             get_local_home_dir,
+            take_recovered_edits,
             sftp_upload,
             sftp_download,
             cancel_transfer,

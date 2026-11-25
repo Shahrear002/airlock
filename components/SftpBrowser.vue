@@ -165,6 +165,7 @@ const loadLocalDir = async (path: string) => {
 }
 
 onMounted(async () => {
+    // Register every listen(...) call first
     unlistenProgress = await listen('transfer-progress', (event: any) => {
         const payload = event.payload;
         if (payload.transfer_id === activeTransferId.value) {
@@ -174,21 +175,6 @@ onMounted(async () => {
         }
     });
 
-    // Load local home dir
-    try {
-        const home = await invoke<string>('get_local_home_dir')
-        localPath.value = home
-        loadLocalDir(home)
-    } catch (e) {
-        localPath.value = 'C:\\'
-        loadLocalDir('C:\\')
-    }
-
-    setTimeout(() => {
-        loadRemoteDir(remotePath.value)
-    }, 1000)
-
-    // Listen for edit file events
     unlistenEditOpened = await listen('edit-file-opened', (event: any) => {
         const { file_name } = event.payload
         showEditToast(`Watching ${file_name} for changes...`, 'info', file_name, 5000)
@@ -227,6 +213,37 @@ onMounted(async () => {
             0
         )
     })
+
+    // Take recovered edits from previous session and show persistent toast if any
+    try {
+        const recovered = await invoke<Array<{ local_path: string, file_name: string }>>('take_recovered_edits')
+        if (recovered && recovered.length > 0) {
+            const n = recovered.length
+            const paths = recovered.map(f => f.local_path).join(', ')
+            showEditToast(
+                `Found ${n} unsaved edits from a previous session (kept for 14 days): ${paths}`,
+                'error',
+                recovered[0].file_name,
+                0
+            )
+        }
+    } catch (e) {
+        console.error('Failed to take recovered edits:', e)
+    }
+
+    // Load local home dir
+    try {
+        const home = await invoke<string>('get_local_home_dir')
+        localPath.value = home
+        loadLocalDir(home)
+    } catch (e) {
+        localPath.value = 'C:\\'
+        loadLocalDir('C:\\')
+    }
+
+    setTimeout(() => {
+        loadRemoteDir(remotePath.value)
+    }, 1000)
 })
 
 onUnmounted(() => {

@@ -1068,18 +1068,12 @@ pub struct RecoveredEdit {
 
 static RECOVERED_EDITS: std::sync::Mutex<Option<Vec<RecoveredEdit>>> = std::sync::Mutex::new(None);
 
-pub fn check_and_emit_recovered_edits(app: &AppHandle) {
-    let to_emit = {
-        if let Ok(mut lock) = RECOVERED_EDITS.lock() {
-            lock.take()
-        } else {
-            None
-        }
-    };
-    if let Some(files) = to_emit {
-        if !files.is_empty() {
-            let _ = app.emit("edits-recovered", &files);
-        }
+#[tauri::command]
+pub fn take_recovered_edits() -> Vec<RecoveredEdit> {
+    if let Ok(mut lock) = RECOVERED_EDITS.lock() {
+        lock.take().unwrap_or_default()
+    } else {
+        Vec::new()
     }
 }
 
@@ -1322,6 +1316,17 @@ pub fn inspect_instance_dir_for_keep(instance_dir: &Path) -> (bool, Vec<Recovere
     (has_fresh_keep, recovered)
 }
 
+fn clean_unmarked_subfolders(instance_dir: &Path) {
+    if let Ok(subdirs) = std::fs::read_dir(instance_dir) {
+        for sub_entry in subdirs.flatten() {
+            let sub_path = sub_entry.path();
+            if sub_path.is_dir() && !sub_path.join(".keep").exists() {
+                let _ = std::fs::remove_dir_all(&sub_path);
+            }
+        }
+    }
+}
+
 /// Sweeps stale `airlock_edits_*` directories, removing unlocked stale directories
 /// while skipping active instances holding an exclusive lock, preserving directories
 /// with fresh .keep markers (< 14 days), skipping brand-new directories (< 10 seconds)
@@ -1380,6 +1385,7 @@ pub fn sweep_stale_temp_edits_in(
 
                         let (has_fresh_keep, recovered) = inspect_instance_dir_for_keep(&path);
                         if has_fresh_keep {
+                            clean_unmarked_subfolders(&path);
                             all_recovered.extend(recovered);
                         } else {
                             let _ = std::fs::remove_dir_all(&path);
@@ -1418,6 +1424,7 @@ pub fn sweep_stale_temp_edits_in(
 
             let (has_fresh_keep, recovered) = inspect_instance_dir_for_keep(&path);
             if has_fresh_keep {
+                clean_unmarked_subfolders(&path);
                 all_recovered.extend(recovered);
             } else {
                 let _ = std::fs::remove_dir_all(&path);
@@ -1524,12 +1531,10 @@ pub fn cleanup_current_instance_on_close() {
 
 #[tauri::command]
 pub async fn sftp_list_dir(
-    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     path: String,
 ) -> Result<Vec<FileEntry>, String> {
-    check_and_emit_recovered_edits(&app);
     let handle = {
         let connections = state.connections.lock().await;
         let conn = connections.get(&id).ok_or("Session not found")?;
@@ -1574,8 +1579,7 @@ pub async fn sftp_list_dir(
 }
 
 #[tauri::command]
-pub async fn local_list_dir(app: AppHandle, path: String) -> Result<Vec<FileEntry>, String> {
-    check_and_emit_recovered_edits(&app);
+pub async fn local_list_dir(path: String) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
     let mut dir = tokio::fs::read_dir(&path)
         .await
@@ -1611,8 +1615,7 @@ pub async fn local_list_dir(app: AppHandle, path: String) -> Result<Vec<FileEntr
 }
 
 #[tauri::command]
-pub fn get_local_home_dir(app: AppHandle) -> Result<String, String> {
-    check_and_emit_recovered_edits(&app);
+pub fn get_local_home_dir() -> Result<String, String> {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .map_err(|_| "Could not determine home directory".into())
@@ -3978,6 +3981,102 @@ mod tests {
             brand_new.exists(),
             "Brand-new directory without .lock (< 10s) must survive the sweep"
         );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_take_recovered_edits_returns_once_then_empty() {
+        let items = vec![
+            RecoveredEdit {
+                local_path: "/tmp/fake/path1.txt".to_string(),
+                file_name: "path1.txt".to_string(),
+            },
+            RecoveredEdit {
+                local_path: "/tmp/fake/path2.txt".to_string(),
+                file_name: "path2.txt".to_string(),
+            },
+        ];
+        if let Ok(mut lock) = RECOVERED_EDITS.lock() {
+            *lock = Some(items.clone());
+        }
+
+        let first = take_recovered_edits();
+        assert_eq!(
+            first, items,
+            "First call must return the stored recovered edits"
+        );
+
+        let second = take_recovered_edits();
+        assert!(second.is_empty(), "Second call must return an empty list");
+
+        let third = take_recovered_edits();
+        assert!(third.is_empty(), "Third call must return an empty list");
+    }
+
+    #[test]
+    fn test_sweep_preserves_directory_deletes_unmarked_subfolders() {
+        let unique = format!("test_sweep_unmarked_{}", std::process::id());
+        let base = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Stale instance directory with .lock (unlocked)
+        let inst_dir = base.join("airlock_edits_9999_freshkeep");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+        let lock_path = inst_dir.join(".lock");
+        std::fs::write(&lock_path, "").unwrap();
+
+        // 1. Subfolder WITH a fresh .keep and a file
+        let marked_sub = inst_dir.join("sub_marked");
+        std::fs::create_dir_all(&marked_sub).unwrap();
+        let marked_file = marked_sub.join("important.txt");
+        std::fs::write(&marked_file, "unsaved important data").unwrap();
+        let keep_file = marked_sub.join(".keep");
+        std::fs::write(&keep_file, "").unwrap();
+
+        // 2. Subfolder WITHOUT .keep (leftover plaintext from aborted/completed edit)
+        let unmarked_sub = inst_dir.join("sub_unmarked");
+        std::fs::create_dir_all(&unmarked_sub).unwrap();
+        let unmarked_file = unmarked_sub.join("secret_leftover.txt");
+        std::fs::write(&unmarked_file, "sensitive plaintext").unwrap();
+
+        // Run the sweep
+        let recovered = sweep_stale_temp_edits_in(&base, None);
+
+        // Instance directory and .lock must still exist
+        assert!(
+            inst_dir.exists(),
+            "Instance directory must be preserved due to fresh .keep"
+        );
+        assert!(lock_path.exists(), ".lock file must be kept");
+
+        // Marked subfolder and its file must still exist
+        assert!(
+            marked_sub.exists(),
+            "Marked subfolder with fresh .keep must be kept"
+        );
+        assert!(
+            marked_file.exists(),
+            "File inside marked subfolder must be kept"
+        );
+        assert!(keep_file.exists(), ".keep marker must still exist");
+
+        // Unmarked subfolder and its file must be deleted!
+        assert!(
+            !unmarked_sub.exists(),
+            "Per-file folder without .keep must be deleted"
+        );
+        assert!(
+            !unmarked_file.exists(),
+            "Leftover plaintext file must be deleted"
+        );
+
+        // Recovered list must contain marked_file
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].file_name, "important.txt");
+        assert_eq!(recovered[0].local_path, marked_file.to_string_lossy());
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&base);
