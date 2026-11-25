@@ -1060,6 +1060,32 @@ pub struct ActiveEditTracker {
 
 static ACTIVE_EDITS: std::sync::Mutex<Vec<ActiveEditTracker>> = std::sync::Mutex::new(Vec::new());
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveredEdit {
+    pub local_path: String,
+    pub file_name: String,
+}
+
+static RECOVERED_EDITS: std::sync::Mutex<Option<Vec<RecoveredEdit>>> = std::sync::Mutex::new(None);
+
+pub fn check_and_emit_recovered_edits(app: &AppHandle) {
+    let to_emit = {
+        if let Ok(mut lock) = RECOVERED_EDITS.lock() {
+            lock.take()
+        } else {
+            None
+        }
+    };
+    if let Some(files) = to_emit {
+        if !files.is_empty() {
+            let _ = app.emit("edits-recovered", &files);
+        }
+    }
+}
+
+const KEEP_RETENTION_SECS: u64 = 14 * 24 * 3600;
+const NO_LOCK_GRACE_SECS: u64 = 10;
+
 /// Validates or creates an instance temporary directory under `base_temp` named
 /// `airlock_edits_<pid>_<random hex>`, acquiring an exclusive advisory lock on `.lock`.
 pub fn create_and_validate_instance_dir(
@@ -1239,9 +1265,73 @@ pub fn create_edit_temp_file_path(
     Ok(target)
 }
 
+/// Inspects an instance directory for `.keep` markers inside per-file folders.
+/// Returns (has_fresh_keep, recovered_files).
+pub fn inspect_instance_dir_for_keep(instance_dir: &Path) -> (bool, Vec<RecoveredEdit>) {
+    let mut has_fresh_keep = false;
+    let mut recovered = Vec::new();
+
+    let subdirs = match std::fs::read_dir(instance_dir) {
+        Ok(s) => s,
+        Err(_) => return (false, recovered),
+    };
+
+    for entry in subdirs.flatten() {
+        let sub_path = entry.path();
+        if !sub_path.is_dir() {
+            continue;
+        }
+        if sub_path.file_name().and_then(|n| n.to_str()) == Some(".lock") {
+            continue;
+        }
+
+        let keep_path = sub_path.join(".keep");
+        if keep_path.exists() {
+            let is_fresh = match std::fs::metadata(&keep_path) {
+                Ok(meta) => match meta.modified() {
+                    Ok(mtime) => match std::time::SystemTime::now().duration_since(mtime) {
+                        Ok(age) => age < std::time::Duration::from_secs(KEEP_RETENTION_SECS),
+                        Err(_) => true,
+                    },
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            };
+
+            if is_fresh {
+                has_fresh_keep = true;
+                if let Ok(files) = std::fs::read_dir(&sub_path) {
+                    for f_entry in files.flatten() {
+                        let fp = f_entry.path();
+                        if fp.is_file() {
+                            if let Some(name) = fp.file_name().and_then(|n| n.to_str()) {
+                                if name != ".keep" && name != ".lock" {
+                                    recovered.push(RecoveredEdit {
+                                        local_path: fp.to_string_lossy().to_string(),
+                                        file_name: name.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (has_fresh_keep, recovered)
+}
+
 /// Sweeps stale `airlock_edits_*` directories, removing unlocked stale directories
-/// while skipping active instances holding an exclusive lock, and removing legacy `airlock_edits`.
-pub fn sweep_stale_temp_edits_in(temp_base: &Path, our_instance: Option<&Path>) {
+/// while skipping active instances holding an exclusive lock, preserving directories
+/// with fresh .keep markers (< 14 days), skipping brand-new directories (< 10 seconds)
+/// without .lock, and removing legacy `airlock_edits`.
+pub fn sweep_stale_temp_edits_in(
+    temp_base: &Path,
+    our_instance: Option<&Path>,
+) -> Vec<RecoveredEdit> {
+    let mut all_recovered = Vec::new();
+
     // 1. Delete the legacy un-namespaced airlock_edits folder once
     let legacy_dir = temp_base.join("airlock_edits");
     if legacy_dir.exists() {
@@ -1251,7 +1341,7 @@ pub fn sweep_stale_temp_edits_in(temp_base: &Path, our_instance: Option<&Path>) 
     // 2. Scan for airlock_edits_* directories
     let entries = match std::fs::read_dir(temp_base) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return all_recovered,
     };
 
     for entry in entries.flatten() {
@@ -1287,7 +1377,13 @@ pub fn sweep_stale_temp_edits_in(temp_base: &Path, our_instance: Option<&Path>) 
                         // Lock obtained! The owner process is gone.
                         // Drop the file lock handle first before deleting (Windows cannot delete an open file)
                         drop(file);
-                        let _ = std::fs::remove_dir_all(&path);
+
+                        let (has_fresh_keep, recovered) = inspect_instance_dir_for_keep(&path);
+                        if has_fresh_keep {
+                            all_recovered.extend(recovered);
+                        } else {
+                            let _ = std::fs::remove_dir_all(&path);
+                        }
                     }
                     Err(_) => {
                         // Locked: another instance is running, skip it
@@ -1295,10 +1391,41 @@ pub fn sweep_stale_temp_edits_in(temp_base: &Path, our_instance: Option<&Path>) 
                 }
             }
         } else {
-            // Unlocked or orphaned directory without .lock
-            let _ = std::fs::remove_dir_all(&path);
+            // No .lock file:
+            // "The sweep skips (does not delete) an airlock_edits_* directory that has no .lock and is younger than 10 seconds."
+            let is_young = match entry.metadata().or_else(|_| std::fs::metadata(&path)) {
+                Ok(meta) => {
+                    let now = std::time::SystemTime::now();
+                    let mtime_age = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| now.duration_since(t).ok());
+                    let ctime_age = meta.created().ok().and_then(|t| now.duration_since(t).ok());
+                    let age = match (mtime_age, ctime_age) {
+                        (Some(m), Some(c)) => m.min(c),
+                        (Some(m), None) => m,
+                        (None, Some(c)) => c,
+                        (None, None) => std::time::Duration::from_secs(0),
+                    };
+                    age < std::time::Duration::from_secs(NO_LOCK_GRACE_SECS)
+                }
+                Err(_) => false,
+            };
+
+            if is_young {
+                continue;
+            }
+
+            let (has_fresh_keep, recovered) = inspect_instance_dir_for_keep(&path);
+            if has_fresh_keep {
+                all_recovered.extend(recovered);
+            } else {
+                let _ = std::fs::remove_dir_all(&path);
+            }
         }
     }
+
+    all_recovered
 }
 
 /// Startup sweep of stale temporary directories.
@@ -1313,7 +1440,10 @@ pub fn cleanup_temp_edits() {
             None
         }
     };
-    sweep_stale_temp_edits_in(&std::env::temp_dir(), our_instance.as_deref());
+    let recovered = sweep_stale_temp_edits_in(&std::env::temp_dir(), our_instance.as_deref());
+    if let Ok(mut lock) = RECOVERED_EDITS.lock() {
+        *lock = Some(recovered);
+    }
 }
 
 /// Called on window close: deletes only our instance directory, keeping any files
@@ -1359,6 +1489,9 @@ pub fn cleanup_current_instance_on_close() {
                     if let Ok(files) = std::fs::read_dir(&sub_path) {
                         for f_entry in files.flatten() {
                             let fp = f_entry.path();
+                            if fp.file_name().and_then(|n| n.to_str()) == Some(".keep") {
+                                continue;
+                            }
                             if unsaved_paths.contains(&fp) {
                                 sub_has_unsaved = true;
                                 has_kept_files = true;
@@ -1367,7 +1500,9 @@ pub fn cleanup_current_instance_on_close() {
                             }
                         }
                     }
-                    if !sub_has_unsaved {
+                    if sub_has_unsaved {
+                        let _ = std::fs::write(sub_path.join(".keep"), "");
+                    } else {
                         let _ = std::fs::remove_dir_all(&sub_path);
                     }
                 } else if !unsaved_paths.contains(&sub_path) {
@@ -1389,10 +1524,12 @@ pub fn cleanup_current_instance_on_close() {
 
 #[tauri::command]
 pub async fn sftp_list_dir(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     path: String,
 ) -> Result<Vec<FileEntry>, String> {
+    check_and_emit_recovered_edits(&app);
     let handle = {
         let connections = state.connections.lock().await;
         let conn = connections.get(&id).ok_or("Session not found")?;
@@ -1437,7 +1574,8 @@ pub async fn sftp_list_dir(
 }
 
 #[tauri::command]
-pub async fn local_list_dir(path: String) -> Result<Vec<FileEntry>, String> {
+pub async fn local_list_dir(app: AppHandle, path: String) -> Result<Vec<FileEntry>, String> {
+    check_and_emit_recovered_edits(&app);
     let mut entries = Vec::new();
     let mut dir = tokio::fs::read_dir(&path)
         .await
@@ -1473,7 +1611,8 @@ pub async fn local_list_dir(path: String) -> Result<Vec<FileEntry>, String> {
 }
 
 #[tauri::command]
-pub fn get_local_home_dir() -> Result<String, String> {
+pub fn get_local_home_dir(app: AppHandle) -> Result<String, String> {
+    check_and_emit_recovered_edits(&app);
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .map_err(|_| "Could not determine home directory".into())
@@ -1971,16 +2110,12 @@ pub async fn cancel_transfer(
 /// Max file size allowed for "Edit Locally" (20 MB).
 const MAX_EDIT_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
-/// Re-upload a local temp file back to the remote server via a fresh SFTP channel.
-async fn upload_from_temp(
+/// Re-upload contents back to the remote server via a fresh SFTP channel.
+async fn upload_bytes_to_remote(
     handle: &Arc<Mutex<russh::client::Handle<crate::ssh_session::Client>>>,
-    local_path: &Path,
+    contents: &[u8],
     remote_path: &str,
 ) -> Result<(), String> {
-    let contents = tokio::fs::read(local_path)
-        .await
-        .map_err(|e| format!("Failed to read temp file: {}", e))?;
-
     let channel = {
         let h = handle.lock().await;
         h.channel_open_session()
@@ -2000,7 +2135,7 @@ async fn upload_from_temp(
         .await
         .map_err(|e| format!("Failed to create remote file: {}", e))?;
     remote_file
-        .write_all(&contents)
+        .write_all(contents)
         .await
         .map_err(|e| format!("Failed to write remote file: {}", e))?;
 
@@ -2314,23 +2449,30 @@ pub async fn edit_remote_file(
                             }
                         };
 
+                        // Upload the bytes you hashed: read the file once, upload those bytes, store the hash of those same bytes.
+                        let bytes = match std::fs::read(&temp_path_clone) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                log::error!("Failed to read temp file for upload: {}", e);
+                                continue;
+                            }
+                        };
+                        let file_hash = compute_sha256(&bytes);
+
                         let handle_ref = handle_clone.clone();
                         let rp = remote_path_clone.clone();
-                        let tp = temp_path_clone.clone();
                         let app_ref = app_clone.clone();
                         let fn_clone = file_name_clone.clone();
 
-                        let result =
-                            rt.block_on(async { upload_from_temp(&handle_ref, &tp, &rp).await });
+                        let result = rt.block_on(async {
+                            upload_bytes_to_remote(&handle_ref, &bytes, &rp).await
+                        });
 
                         match result {
                             Ok(()) => {
                                 last_upload = Some(Instant::now());
-                                if let Ok(bytes) = std::fs::read(&tp) {
-                                    let h = compute_sha256(&bytes);
-                                    if let Ok(mut luh) = last_uploaded_hash_clone.lock() {
-                                        *luh = h;
-                                    }
+                                if let Ok(mut luh) = last_uploaded_hash_clone.lock() {
+                                    *luh = file_hash;
                                 }
                                 let _ = app_ref.emit(
                                     "edit-file-saved",
@@ -2387,6 +2529,9 @@ pub async fn edit_remote_file(
                 "Watcher ended with unsaved changes. Preserving temp file: {}",
                 temp_path_clone.display()
             );
+            if let Some(parent) = temp_path_clone.parent() {
+                let _ = std::fs::write(parent.join(".keep"), "");
+            }
             let _ = app_clone.emit(
                 "edit-unsaved",
                 serde_json::json!({
@@ -3754,6 +3899,87 @@ mod tests {
         let res = create_and_validate_instance_dir(&base, 8888, "symlink");
         assert!(res.is_err(), "Symlink directory must be refused");
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_sweep_keep_markers_and_grace_periods() {
+        let base = std::env::temp_dir().join(format!("test_sweep_keep_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // 1. Legacy directory
+        let legacy = base.join("airlock_edits");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("old.txt"), "legacy").unwrap();
+
+        // 2. Stale directory with a fresh .keep marker (< 14 days)
+        let stale_fresh = base.join("airlock_edits_1001_freshkeep");
+        let per_file_fresh = stale_fresh.join("sub_fresh");
+        std::fs::create_dir_all(&per_file_fresh).unwrap();
+        std::fs::write(stale_fresh.join(".lock"), "").unwrap();
+        let fresh_file = per_file_fresh.join("notes.txt");
+        std::fs::write(&fresh_file, "unsaved changes").unwrap();
+        let fresh_keep = per_file_fresh.join(".keep");
+        std::fs::write(&fresh_keep, "").unwrap();
+
+        // 3. Stale directory with an old .keep marker (aged to > 14 days)
+        let stale_old = base.join("airlock_edits_1002_oldkeep");
+        let per_file_old = stale_old.join("sub_old");
+        std::fs::create_dir_all(&per_file_old).unwrap();
+        std::fs::write(stale_old.join(".lock"), "").unwrap();
+        std::fs::write(per_file_old.join("old_notes.txt"), "stale old changes").unwrap();
+        let old_keep = per_file_old.join(".keep");
+        std::fs::write(&old_keep, "").unwrap();
+        // Age the .keep marker to 15 days ago using File::set_modified
+        let keep_file = std::fs::File::options()
+            .write(true)
+            .open(&old_keep)
+            .unwrap();
+        let fifteen_days_ago = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(15 * 24 * 3600))
+            .unwrap();
+        keep_file.set_modified(fifteen_days_ago).unwrap();
+        drop(keep_file);
+
+        // 4. Brand-new directory without .lock (< 10 seconds old)
+        let brand_new = base.join("airlock_edits_1003_brandnew");
+        std::fs::create_dir_all(&brand_new).unwrap();
+
+        // Run the sweep
+        let recovered = sweep_stale_temp_edits_in(&base, None);
+
+        // Assertions:
+        // 1. Legacy folder is removed
+        assert!(
+            !legacy.exists(),
+            "Legacy airlock_edits directory must be removed"
+        );
+
+        // 2. Stale directory with fresh .keep survives the sweep
+        assert!(
+            stale_fresh.exists(),
+            "Stale directory with fresh .keep must survive the sweep"
+        );
+        assert!(fresh_file.exists(), "Kept file must still exist");
+        assert!(
+            recovered.iter().any(|r| r.file_name == "notes.txt"
+                && r.local_path == fresh_file.to_string_lossy()),
+            "Fresh unsaved edit must be recovered in sweep results"
+        );
+
+        // 3. Stale directory with old .keep is deleted
+        assert!(
+            !stale_old.exists(),
+            "Stale directory with old .keep (> 14 days) must be deleted"
+        );
+
+        // 4. Brand-new directory without .lock survives the sweep
+        assert!(
+            brand_new.exists(),
+            "Brand-new directory without .lock (< 10s) must survive the sweep"
+        );
+
+        // Cleanup
         let _ = std::fs::remove_dir_all(&base);
     }
 }

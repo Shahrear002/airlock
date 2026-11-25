@@ -1,6 +1,6 @@
 # Security & Encryption
 
-Airlock is designed with a **Local-First** security model, enforcing cryptographic verification, rigorous file isolation, and principle-of-least-privilege execution across all operations.
+Airlock is designed with a **Local-First** security model, enforcing cryptographic verification and rigorous file isolation.
 
 ## SSH Host Key Verification
 
@@ -64,7 +64,7 @@ Airlock enforces strict isolation, non-overwriting guarantees, and defensive exe
    - **Per-OS Safe Fallback:** When a non-allowlisted file is edited and no custom external editor is configured:
      - **Windows:** Opens safely inside `notepad.exe`.
      - **macOS:** Opens safely with `open -t` (plain text editor).
-     - **Linux:** Opens via `xdg-open` (or prompt to configure an editor).
+     - **Linux:** Opens via `xdg-open` only for safe-allowlisted files; non-allowlisted files require configuring an external editor in Settings.
 
 4. **External Editor Stored in OS Keyring:**
    - You can configure a preferred external editor under **Settings & Security > External Editor**.
@@ -76,8 +76,8 @@ Airlock enforces strict isolation, non-overwriting guarantees, and defensive exe
    - **Per-Process Directory:** Each Airlock instance creates its own isolated temporary directory: `<temp>/airlock_edits_<pid>_<random hex>`. On Unix, it is created with mode `0700` and verified with `symlink_metadata` (must be a real directory, owned by the user, mode `0700`).
    - **Advisory File Lock:** The instance acquires an exclusive advisory lock on `<instance dir>/.lock` held for the lifetime of the process.
    - **Confined Per-File Subdirectories:** Each edited file is isolated in `<instance dir>/<random hex>/<sanitized name>`. If the original name fails sanitization, it falls back safely to `file.<ext>`.
-   - **Startup Sweep:** During startup, Airlock sweeps other `airlock_edits_*` directories and attempts a non-blocking lock. Locked directories (active instances) are preserved; unlocked directories (stale from previous crashes) are cleaned up. Legacy un-namespaced `airlock_edits` folders are also purged.
-   - **Never Deletes Unsaved Edits:** When an SSH session closes or the app window is closed while local edits remain un-uploaded, Airlock **keeps** the modified temp file on disk and emits an `edit-unsaved` alert notifying you of the exact local path where your changes are safely preserved.
+   - **Startup Sweep & 14-Day Keep Retention:** During startup, Airlock sweeps other `airlock_edits_*` directories and attempts a non-blocking lock. Active instances holding an exclusive lock are preserved. Unlocked stale directories from previous sessions are inspected for `.keep` markers: any instance directory containing a per-file folder with a `.keep` marker modified within the last 14 days is preserved (survives the sweep) and its files are recovered. Once older than 14 days, the stale directory is purged. The sweep also skips brand-new `airlock_edits_*` directories without `.lock` that are younger than 10 seconds. Legacy un-namespaced `airlock_edits` folders are purged.
+   - **Never Deletes Unsaved Edits Across Restarts:** When an SSH session closes or the app window is closed while local edits remain un-uploaded, Airlock writes a `.keep` marker inside that file's per-file folder, **keeps** the modified temp file on disk, and emits an `edit-unsaved` alert notifying you of the exact local path where your changes are saved and kept for 14 days. On subsequent launches, recovered edits are detected and an `edits-recovered` notification reports all preserved unsaved files.
 
 ## Recommendations
 

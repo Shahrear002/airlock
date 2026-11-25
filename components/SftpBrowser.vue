@@ -68,6 +68,7 @@ let unlistenEditOpened: (() => void) | null = null;
 let unlistenEditSaved: (() => void) | null = null;
 let unlistenEditError: (() => void) | null = null;
 let unlistenEditUnsaved: (() => void) | null = null;
+let unlistenEditsRecovered: (() => void) | null = null;
 
 // Edit toast state
 const editToast = ref<{ show: boolean, message: string, type: 'info' | 'success' | 'error', fileName: string }>(
@@ -206,9 +207,23 @@ onMounted(async () => {
     unlistenEditUnsaved = await listen('edit-unsaved', (event: any) => {
         const { local_path, file_name } = event.payload
         showEditToast(
-            `Your edits to ${file_name} could not be uploaded (session closed). They are saved at ${local_path}.`,
+            `Your edits to ${file_name} could not be uploaded (session closed). They are saved at ${local_path} and kept for 14 days.`,
             'error',
             file_name,
+            0
+        )
+    })
+
+    unlistenEditsRecovered = await listen('edits-recovered', (event: any) => {
+        const files: Array<{ local_path: string, file_name: string }> =
+            Array.isArray(event.payload) ? event.payload : (event.payload?.files || [])
+        if (!files || files.length === 0) return
+        const n = files.length
+        const paths = files.map(f => f.local_path).join(', ')
+        showEditToast(
+            `Found ${n} unsaved edits from a previous session (kept for 14 days): ${paths}`,
+            'error',
+            files[0].file_name,
             0
         )
     })
@@ -220,6 +235,7 @@ onUnmounted(() => {
     if (unlistenEditSaved) unlistenEditSaved();
     if (unlistenEditError) unlistenEditError();
     if (unlistenEditUnsaved) unlistenEditUnsaved();
+    if (unlistenEditsRecovered) unlistenEditsRecovered();
     if (editToastTimer) clearTimeout(editToastTimer);
     if (summaryToastTimer) clearTimeout(summaryToastTimer);
 })
